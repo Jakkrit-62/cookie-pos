@@ -828,7 +828,8 @@ function renderTabs() {
   if (state.category !== 'all' && !cats.some((c) => c.id === state.category)) state.category = 'all';
   const count = (cid) => state.catalog.items.filter((it) => (cid === 'all' || it.categoryId === cid) && itemAvailability(it) !== 'hidden').length;
   $('#catTabs').innerHTML = [{ id: 'all', name: 'ทั้งหมด' }, ...cats].map((c) =>
-    `<button class="cat-tab ${state.category === c.id ? 'active' : ''}" data-cat="${esc(c.id)}" type="button">${esc(c.name)}<span class="cnt">${count(c.id)}</span></button>`).join('');
+    `<button class="cat-tab ${state.category === c.id ? 'active' : ''}" data-cat="${esc(c.id)}" type="button">${esc(c.name)}<span class="cnt">${count(c.id)}</span></button>`).join('') +
+    `<button class="cat-tab add" data-act="cat-manage" type="button" aria-label="เพิ่ม/จัดการหมวดหมู่" title="เพิ่ม/จัดการหมวดหมู่">＋</button>`;
 }
 
 function cardTag(it) {
@@ -2068,8 +2069,11 @@ function renderItemEditor() {
       <div class="ed-right">
         <label class="ed-field"><span>ชื่อเมนู *</span><input class="input" data-bind="name" type="text" value="${esc(d.name)}" placeholder="เช่น ซอฟต์คุกกี้ มัทฉะ" /></label>
         <div class="ed-row">
-          <label class="ed-field"><span>หมวดหมู่</span>
-            <select class="input" data-bind="categoryId">${state.catalog.categories.map((c) => `<option value="${esc(c.id)}" ${d.categoryId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+          <div class="ed-field"><span>หมวดหมู่</span>
+            <div class="cat-pick">
+              <select class="input" data-bind="categoryId">${state.catalog.categories.map((c) => `<option value="${esc(c.id)}" ${d.categoryId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+              <button class="btn btn-outline" data-ed="cat-new" type="button">${svg('plus', 16)} หมวดใหม่</button>
+            </div></div>
           <label class="ed-field"><span>ป้ายบนการ์ด (ไม่บังคับ)</span><input class="input" data-bind="tag" type="text" value="${esc(d.tag)}" placeholder="อัตโนมัติ เช่น 3 ชิ้น ฿100" /></label>
         </div>
         <div class="ed-sub-title">รูปแบบการขาย</div>
@@ -2108,9 +2112,31 @@ function editorAction(act, el) {
   else if (act === 'opt-del') d.optionGroups[gi].options.splice(Number(el.dataset.o), 1);
   else if (act === 'img') { imageTarget = '__editor__'; $('#imageInput').value = ''; $('#imageInput').click(); return; }
   else if (act === 'img-del') ed.image = null;
+  else if (act === 'cat-new') { newCategoryFromEditor(); return; }
   else if (act === 'save') { saveItemEditor(); return; }
   else if (act === 'delete') { deleteItem(d.id); return; }
   renderItemEditor();
+}
+
+/** Create a category without leaving the item form, and select it for this item. */
+async function newCategoryFromEditor() {
+  const r = await confirmDialog({
+    title: 'เพิ่มหมวดหมู่ใหม่',
+    html: '<p class="help">หมวดจะแสดงเป็นแท็บบนหน้าขาย — เปลี่ยนชื่อ จัดลำดับ หรือซ่อนได้ภายหลังที่แท็บ “หมวดหมู่”</p>',
+    okText: 'เพิ่มหมวดหมู่',
+    input: { placeholder: 'ชื่อหมวดหมู่ เช่น เครื่องดื่ม' },
+  });
+  if (!r.ok) return;
+  const name = (r.value || '').trim();
+  if (!name) return toast('กรุณาใส่ชื่อหมวดหมู่', 'warn');
+  const existing = state.catalog.categories.find((c) => c.name === name);
+  const id = existing ? existing.id : `c_${uid()}`;
+  if (!existing) state.catalog.categories.push({ id, name, hidden: false, promoId: '' });
+  ed.draft.categoryId = id;
+  commitCatalog();
+  renderItemEditor();
+  if (isOpen('m-manage')) renderManager();
+  toast(existing ? `ใช้หมวด “${name}” ที่มีอยู่แล้ว` : `เพิ่มหมวด “${name}” แล้ว`, 'success', 1800);
 }
 
 async function saveItemEditor() {
@@ -2839,6 +2865,7 @@ function bindEvents() {
   $('#btnUpdate').addEventListener('click', updateApp);
 
   $('#catTabs').addEventListener('click', (e) => {
+    if (e.target.closest('[data-act="cat-manage"]')) { openManager('cats'); return; }
     const b = e.target.closest('[data-cat]');
     if (!b) return;
     state.category = b.dataset.cat;

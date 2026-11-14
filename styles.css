@@ -640,6 +640,15 @@ table.tbl { width: 100%; min-width: 960px; border-collapse: collapse; font-size:
 .member small { color: var(--muted); }
 .member.on { border-color: var(--burgundy); background: var(--burgundy-soft); }
 
+.cat-tab.add {
+  position: sticky; right: 0; flex: 0 0 auto; min-width: 52px; padding: 0 16px; font-size: 22px; line-height: 1;
+  background: var(--cream); border: 2px dashed var(--burgundy); color: var(--burgundy);
+  box-shadow: -10px 0 8px -4px var(--cream);
+}
+.cat-pick { display: flex; gap: 8px; }
+.cat-pick .input { flex: 1; min-width: 0; }
+.cat-pick .btn { flex: 0 0 auto; padding: 0 14px; }
+
 /* stock tab */
 .pool-name { height: 44px; font-size: 16px; font-weight: 600; padding: 0 10px; }
 
