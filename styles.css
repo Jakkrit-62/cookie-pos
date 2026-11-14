@@ -75,8 +75,8 @@ h2, h3, h4 { font-weight: 600; }
 }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .brand-logo {
-  width: 44px; height: 44px; border-radius: 12px;
-  background: var(--cream); color: var(--burgundy);
+  height: 48px; width: auto; flex: 0 0 auto; padding: 3px 6px; border-radius: 12px;
+  background: var(--cream); object-fit: contain;
 }
 .brand-name { font-size: 18px; font-weight: 700; line-height: 1.1; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
 .brand-sub { font-size: 12px; opacity: 0.8; white-space: nowrap; }

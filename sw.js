@@ -6,7 +6,7 @@
    localStorage / IndexedDB are never touched by this file.
    ========================================================================== */
 
-const SW_VERSION = '1.0.0';
+const SW_VERSION = '1.0.1';
 const CACHE_PREFIX = 'ipad-pos-';
 const CACHE_NAME = `${CACHE_PREFIX}${SW_VERSION}`;
 const NETWORK_TIMEOUT_MS = 4000;
@@ -17,6 +17,7 @@ const APP_SHELL = [
   './styles.css',
   './app.js',
   './manifest.json',
+  './icons/logo-mascot.png',
   './icons/icon-192.png',
   './icons/icon-512.png',
   './icons/apple-touch-icon.png',
