@@ -74,12 +74,27 @@ h2, h3, h4 { font-weight: 600; }
   z-index: 5;
 }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.brand-logo {
-  height: 48px; width: auto; flex: 0 0 auto; padding: 3px 6px; border-radius: 12px;
-  background: var(--cream); object-fit: contain;
+.brand-card {
+  position: relative; display: flex; align-items: center; gap: 4px;
+  height: 60px; padding: 0 18px 0 6px; margin-top: 12px;
+  background: var(--cream); border-radius: 18px;
+  border: 2px solid #5c1d19;
+  box-shadow: 0 3px 0 rgba(0, 0, 0, 0.22), inset 0 0 0 2px rgba(255, 255, 255, 0.55);
 }
-.brand-name { font-size: 18px; font-weight: 700; line-height: 1.1; white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
-.brand-sub { font-size: 12px; opacity: 0.8; white-space: nowrap; }
+.brand-logo {
+  height: 74px; width: auto; flex: 0 0 auto;
+  margin-top: -22px;          /* mascot peeks up above the card, like the logo */
+  filter: drop-shadow(0 2px 2px rgba(60, 20, 15, 0.25));
+}
+.brand-text { display: flex; flex-direction: column; justify-content: center; }
+.brand-name {
+  font-family: 'Chonburi', 'Prompt', serif; font-size: 25px; line-height: 1.1; white-space: nowrap;
+  color: var(--burgundy); letter-spacing: 0.2px;
+}
+.brand-sub {
+  margin-top: 3px; font-size: 9.5px; font-weight: 600; letter-spacing: 2.2px; white-space: nowrap;
+  color: #8a5a4f;
+}
 .clock {
   display: flex; flex-direction: column; align-items: center;
   padding: 2px 12px; border-left: 1px solid rgba(255,255,255,.25); border-right: 1px solid rgba(255,255,255,.25);
@@ -529,8 +544,8 @@ table.tbl { width: 100%; min-width: 960px; border-collapse: collapse; font-size:
   .stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 1060px) {
-  .brand-sub { display: none; }
-  .brand-name { max-width: 130px; font-size: 16px; }
+  .brand-name { font-size: 21px; }
+  .brand-sub { letter-spacing: 1.2px; font-size: 8.5px; }
   .hbtn { padding: 0 10px; font-size: 14px; }
   .clock-time { font-size: 18px; }
   .card-name { font-size: 15px; }
@@ -541,6 +556,7 @@ table.tbl { width: 100%; min-width: 960px; border-collapse: collapse; font-size:
   .menu-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .cereal-layout, .gooey-layout, .pay-layout { grid-template-columns: 1fr; }
   .brand-text { display: none; }
+  .brand-card { padding-right: 6px; }
   .stock-row { grid-template-columns: 64px minmax(0, 1fr); }
   .stock-row .stock-input-wrap, .stock-row .quick-add { grid-column: 2; }
 }

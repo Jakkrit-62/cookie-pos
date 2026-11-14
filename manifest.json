@@ -1,6 +1,6 @@
 {
-  "name": "Cookie POS — ระบบขายหน้าร้าน",
-  "short_name": "Cookie POS",
+  "name": "Maysa.Meekanom — ระบบขายหน้าร้าน",
+  "short_name": "เมษามีขนม",
   "description": "Offline-first iPad POS สำหรับร้านคุกกี้ พร้อม Sync ไป Google Sheets",
   "lang": "th",
   "start_url": "./",

@@ -6,7 +6,7 @@
    localStorage / IndexedDB are never touched by this file.
    ========================================================================== */
 
-const SW_VERSION = '1.0.1';
+const SW_VERSION = '1.0.2';
 const CACHE_PREFIX = 'ipad-pos-';
 const CACHE_NAME = `${CACHE_PREFIX}${SW_VERSION}`;
 const NETWORK_TIMEOUT_MS = 4000;
@@ -24,7 +24,7 @@ const APP_SHELL = [
 ];
 
 const EXTERNAL_ASSETS = [
-  'https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap',
+  'https://fonts.googleapis.com/css2?family=Chonburi&family=Prompt:wght@300;400;500;600;700&display=swap',
   'https://cdn.tailwindcss.com',
 ];
 

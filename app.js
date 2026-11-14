@@ -217,7 +217,7 @@ function lsSet(key, value) {
 const defaultStock = () => Object.fromEntries(Object.keys(STOCK_ITEMS).map((k) => [k, 0]));
 const defaultSettings = () => ({
   gasUrl: '',
-  shopName: 'Cookie POS',
+  shopName: 'Maysa.Meekanom',
   deviceName: 'iPad-1',
   lastSyncAt: '',
   lastSyncError: '',
@@ -239,6 +239,7 @@ const state = {
   category: 'all',
   syncing: false,
 };
+if (state.settings.shopName === 'Cookie POS') state.settings.shopName = 'Maysa.Meekanom';
 if (!Array.isArray(state.orders)) state.orders = [];
 if (!Array.isArray(state.queue)) state.queue = [];
 if (!Array.isArray(state.cart.lines)) state.cart.lines = [];
@@ -526,8 +527,8 @@ function renderClock() {
 }
 
 function renderHeader() {
-  $('#shopName').textContent = state.settings.shopName || 'Cookie POS';
-  document.title = state.settings.shopName || 'Cookie POS';
+  $('#shopName').textContent = state.settings.shopName || 'Maysa.Meekanom';
+  document.title = state.settings.shopName || 'Maysa.Meekanom';
   const online = navigator.onLine;
   const badge = $('#netBadge');
   badge.textContent = online ? 'Online' : 'Offline';
@@ -1951,7 +1952,7 @@ function bindEvents() {
     } else if (act === 'test-url') testConnection();
     else if (act === 'sync-all') syncNow();
     else if (act === 'save-shop') {
-      state.settings.shopName = $('#shopNameInput').value.trim() || 'Cookie POS';
+      state.settings.shopName = $('#shopNameInput').value.trim() || 'Maysa.Meekanom';
       state.settings.deviceName = $('#deviceInput').value.trim() || 'iPad-1';
       save.settings();
       renderHeader();
