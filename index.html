@@ -43,7 +43,7 @@
           <img class="brand-logo" src="./icons/logo-mascot.png" alt="โลโก้ร้าน" />
           <div class="brand-text">
             <div class="brand-name" id="shopName">Maysa.Meekanom</div>
-            <div class="brand-sub">HOMEMADE BAKERY &amp; COOKIES</div>
+            <div class="brand-sub" id="shopSub">HOMEMADE BAKERY &amp; COOKIES</div>
           </div>
         </div>
       </div>
@@ -63,7 +63,7 @@
       </button>
       <button class="hbtn" id="btnStock" type="button">
         <span data-icon="box"></span>
-        <span class="lbl-long">จัดการสต็อก &amp; รูปภาพ</span><span class="lbl-short">สต็อก</span>
+        <span class="lbl-long">จัดการเมนู &amp; สต็อก</span><span class="lbl-short">เมนู/สต็อก</span>
       </button>
       <button class="hbtn" id="btnHistory" type="button">
         <span data-icon="receipt"></span>
@@ -121,8 +121,8 @@
 
   <!-- ================= MODALS ================= -->
 
-  <!-- Cereal cookie: weight & giveaway -->
-  <div class="modal" id="m-cereal" role="dialog" aria-modal="true">
+  <!-- Sell by weight: sold grams / giveaway grams / item discount -->
+  <div class="modal" id="m-weight" role="dialog" aria-modal="true">
     <div class="modal-card modal-lg">
       <div class="modal-head"><h2 class="modal-title"></h2><button class="modal-x" data-close type="button" aria-label="ปิด">&times;</button></div>
       <div class="modal-body"></div>
@@ -130,10 +130,10 @@
     </div>
   </div>
 
-  <!-- Gooey set builder -->
-  <div class="modal" id="m-gooey" role="dialog" aria-modal="true">
+  <!-- Set with modifiers / add-ons -->
+  <div class="modal" id="m-set" role="dialog" aria-modal="true">
     <div class="modal-card modal-lg">
-      <div class="modal-head"><h2 class="modal-title">Gooey Chocolate + Ice Cream</h2><button class="modal-x" data-close type="button" aria-label="ปิด">&times;</button></div>
+      <div class="modal-head"><h2 class="modal-title"></h2><button class="modal-x" data-close type="button" aria-label="ปิด">&times;</button></div>
       <div class="modal-body"></div>
       <div class="modal-foot"></div>
     </div>
@@ -148,12 +148,21 @@
     </div>
   </div>
 
-  <!-- Stock & images -->
-  <div class="modal" id="m-stock" role="dialog" aria-modal="true">
+  <!-- Menu / category / promo / stock manager (GrabMerchant-style) -->
+  <div class="modal" id="m-manage" role="dialog" aria-modal="true">
     <div class="modal-card modal-xl">
-      <div class="modal-head"><h2 class="modal-title">จัดการสต็อก &amp; รูปภาพ</h2><button class="modal-x" data-close type="button" aria-label="ปิด">&times;</button></div>
+      <div class="modal-head"><h2 class="modal-title">จัดการเมนู &amp; สต็อก</h2><button class="modal-x" data-close type="button" aria-label="ปิด">&times;</button></div>
       <div class="modal-body"></div>
-      <div class="modal-foot"><span class="foot-note">ระบบบันทึกอัตโนมัติทันทีที่แก้ไข</span><button class="btn btn-primary" data-close type="button">เสร็จสิ้น</button></div>
+      <div class="modal-foot"><span class="foot-note">บันทึกในเครื่องอัตโนมัติ</span><button class="btn btn-primary" data-close type="button">เสร็จสิ้น</button></div>
+    </div>
+  </div>
+
+  <!-- Item editor (stacks above the manager) -->
+  <div class="modal modal-mid" id="m-item" role="dialog" aria-modal="true">
+    <div class="modal-card modal-xl">
+      <div class="modal-head"><h2 class="modal-title">แก้ไขเมนู</h2><button class="modal-x" data-close type="button" aria-label="ปิด">&times;</button></div>
+      <div class="modal-body"></div>
+      <div class="modal-foot"></div>
     </div>
   </div>
 

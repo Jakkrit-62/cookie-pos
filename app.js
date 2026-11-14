@@ -1,111 +1,102 @@
 /* ==========================================================================
-   iPad POS — app.js
-   Offline-first point-of-sale: state, promo engine, stock, images, sync queue.
+   iPad POS — app.js  (v2: dynamic catalog + multi-device cloud sync)
+   Offline-first point-of-sale: catalog, promo engine, stock pools, images,
+   order sync queue and two-way state sync with Google Sheets.
    No build step: plain ES2018+ that runs on iPadOS Safari 14+.
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '2.0.0';
 
 /* ==========================================================================
-   1. CATALOG  (edit prices / flavors here)
+   1. CONSTANTS
    ========================================================================== */
 
 const UNIT_LABEL = { pcs: 'ชิ้น', g: 'กรัม', scoop: 'สกู๊ป' };
-
-const CATEGORIES = [
-  { id: 'all', name: 'ทั้งหมด' },
-  { id: 'soft', name: 'ซอฟต์คุกกี้' },
-  { id: 'cereal', name: 'ซีเรียลคุกกี้' },
-  { id: 'gooey', name: 'Gooey & ไอศกรีม' },
-  { id: 'puff', name: 'ครีมพัฟ & ชูครีม' },
-];
-const CATEGORY_NAME = Object.fromEntries(CATEGORIES.map((c) => [c.id, c.name]));
-
-const SOFT_FLAVORS = [
-  ['sc_classic', 'รสคลาสสิก'],
-  ['sc_nutella', 'นูเทลล่า'],
-  ['sc_redvelvet', 'เรดเวลเวท'],
-  ['sc_smore', 'สมอร์'],
-  ['sc_triplechoc', 'ทริปเปิ้ลช้อก'],
-  ['sc_biscoff', 'บิสคอฟ'],
-  ['sc_strawberry', 'สตอเบอรี่'],
-  ['sc_birthday', 'เบิร์ดเดย์'],
-];
-const CEREAL_FLAVORS = [
-  ['cc_chocchip', 'ช็อกโกแลตชิพ'],
-  ['cc_matcha', 'มัทฉะ'],
-  ['cc_redvelvet', 'เรดเวลเวท'],
-  ['cc_cocoa', 'โกโก้'],
-];
-
-const SOFT_PRICE = 39;
-const CEREAL_PRICE_PER_G = 1;
-const CEREAL_MIN_G = 20;
-const GOOEY = { basePrice: 59, extraScoop: 20, extraCookie: 39 };
-
-const MENU = [
-  ...SOFT_FLAVORS.map(([id, name]) => ({
-    id, cat: 'soft', type: 'unit', name, fullName: `ซอฟต์คุกกี้ ${name}`,
-    price: SOFT_PRICE, stockKey: id, promo: 'soft', tag: '3 ชิ้น ฿100',
-  })),
-  ...CEREAL_FLAVORS.map(([id, name]) => ({
-    id, cat: 'cereal', type: 'cereal', name, fullName: `ซีเรียลคุกกี้ ${name}`,
-    pricePerGram: CEREAL_PRICE_PER_G, stockKey: id, tag: 'ชั่งน้ำหนัก',
-  })),
-  {
-    id: 'gooey_set', cat: 'gooey', type: 'gooey', name: 'Gooey Chocolate + Ice Cream',
-    fullName: 'Gooey Chocolate + Ice Cream', price: GOOEY.basePrice, tag: 'เซ็ต',
-  },
-  {
-    id: 'puff_osaka', cat: 'puff', type: 'unit', name: 'Osaka Cream Puff', fullName: 'Osaka Cream Puff',
-    price: 29, stockKey: 'puff_osaka', promo: 'puff', tag: '4 ชิ้น ฿99',
-  },
-  {
-    id: 'choux_cream', cat: 'puff', type: 'unit', name: 'ชูครีม', fullName: 'ชูครีม (Choux Cream)',
-    price: 12, stockKey: 'choux_cream', promo: 'choux', tag: '5 ชิ้น ฿50',
-  },
-];
-const MENU_BY_ID = Object.fromEntries(MENU.map((m) => [m.id, m]));
-
-/** Every stock pool. `image` = which menu card's photo is managed on this row. */
-const STOCK_ITEMS = {
-  ...Object.fromEntries(SOFT_FLAVORS.map(([id, n]) => [id, { name: `ซอฟต์คุกกี้ ${n}`, unit: 'pcs', image: id }])),
-  ...Object.fromEntries(CEREAL_FLAVORS.map(([id, n]) => [id, { name: `ซีเรียลคุกกี้ ${n}`, unit: 'g', image: id }])),
-  gooey_cookie: { name: 'คุกกี้ Gooey Chocolate', unit: 'pcs', image: 'gooey_set' },
-  ice_hokkaido: { name: 'ไอศกรีม รสฮอกไกโด (Hokkaido)', unit: 'scoop' },
-  ice_vanilla: { name: 'ไอศกรีม รสวนิลา (Vanilla)', unit: 'scoop' },
-  puff_osaka: { name: 'Osaka Cream Puff', unit: 'pcs', image: 'puff_osaka' },
-  choux_cream: { name: 'ชูครีม (Choux Cream)', unit: 'pcs', image: 'choux_cream' },
+const MODES = {
+  unit: { label: 'ขายเป็นชิ้น', en: 'Per Piece' },
+  weight: { label: 'ขายตามน้ำหนัก (กรัม)', en: 'By Weight' },
+  set: { label: 'เซ็ต + ตัวเลือก / Add-on', en: 'Set with Modifiers' },
 };
-
-const STOCK_GROUPS = [
-  { title: 'ซอฟต์คุกกี้', note: '8 รส · นับเป็นชิ้น', keys: SOFT_FLAVORS.map((f) => f[0]) },
-  { title: 'ซีเรียลคุกกี้', note: '4 รส · นับเป็นกรัม', keys: CEREAL_FLAVORS.map((f) => f[0]) },
-  { title: 'Gooey Chocolate + Ice Cream', note: 'คุกกี้ (ชิ้น) · ไอศกรีม (สกู๊ป)', keys: ['gooey_cookie', 'ice_hokkaido', 'ice_vanilla'] },
-  { title: 'Osaka Cream Puff & ชูครีม', note: 'นับเป็นชิ้น', keys: ['puff_osaka', 'choux_cream'] },
-];
-
-const ICE = {
-  hokkaido: { key: 'ice_hokkaido', name: 'ฮอกไกโด', en: 'Hokkaido' },
-  vanilla: { key: 'ice_vanilla', name: 'วนิลา', en: 'Vanilla' },
+const AVAIL = {
+  normal: 'เปิดขายตามสต็อก',
+  soldout: 'ปิดขายชั่วคราววันนี้',
+  hidden: 'ซ่อนจากหน้าขาย',
 };
-
-/** Mix-and-match bundle promotions (auto-applied). */
-const PROMOS = {
-  soft: { label: 'โปรซอฟต์คุกกี้ 3 ชิ้น 100', size: 3, discount: 17 },
-  puff: { label: 'โปรครีมพัฟ 4 ชิ้น 99', size: 4, discount: 17 },
-  choux: { label: 'โปรชูครีม 5 ชิ้น 50', size: 5, discount: 10 },
-};
-
 const PAY_METHODS = {
   cash: { label: 'เงินสด', en: 'Cash', icon: 'cash' },
   qr: { label: 'สแกน QR', en: 'QR Code', icon: 'qr' },
   tcp: { label: 'ไทยช่วยไทยพลัส', en: 'Thai Chuay Thai Plus', icon: 'gov' },
 };
+const PAY_LABEL_TO_KEY = { 'เงินสด': 'cash', 'สแกน QR': 'qr', 'ไทยช่วยไทยพลัส': 'tcp' };
+
+/** Menu photos: small enough to fit one Google Sheets cell (< 50,000 chars). */
+const IMG_SIZE = 250;
+const IMG_QUALITY = 0.72;
+const IMG_MAX_CHARS = 34000; // ≈ 25 KB JPEG
 
 /* ==========================================================================
-   2. ICONS (inline SVG — no network needed)
+   2. SEED CATALOG (the original bakery menu — used on first run / migration)
+   ========================================================================== */
+
+function buildSeedCatalog() {
+  const soft = [
+    ['sc_classic', 'รสคลาสสิก'], ['sc_nutella', 'นูเทลล่า'], ['sc_redvelvet', 'เรดเวลเวท'], ['sc_smore', 'สมอร์'],
+    ['sc_triplechoc', 'ทริปเปิ้ลช้อก'], ['sc_biscoff', 'บิสคอฟ'], ['sc_strawberry', 'สตอเบอรี่'], ['sc_birthday', 'เบิร์ดเดย์'],
+  ];
+  const cereal = [['cc_chocchip', 'ช็อกโกแลตชิพ'], ['cc_matcha', 'มัทฉะ'], ['cc_redvelvet', 'เรดเวลเวท'], ['cc_cocoa', 'โกโก้']];
+  const item = (o) => normalizeItem(o);
+  return {
+    schema: 1,
+    updatedAt: '',
+    categories: [
+      { id: 'soft', name: 'ซอฟต์คุกกี้', hidden: false, promoId: 'p_soft' },
+      { id: 'cereal', name: 'ซีเรียลคุกกี้', hidden: false, promoId: '' },
+      { id: 'gooey', name: 'Gooey & ไอศกรีม', hidden: false, promoId: '' },
+      { id: 'puff', name: 'ครีมพัฟ & ชูครีม', hidden: false, promoId: '' },
+    ],
+    pools: [
+      ...soft.map(([id, n]) => ({ id, name: `ซอฟต์คุกกี้ ${n}`, unit: 'pcs' })),
+      ...cereal.map(([id, n]) => ({ id, name: `ซีเรียลคุกกี้ ${n}`, unit: 'g' })),
+      { id: 'gooey_cookie', name: 'คุกกี้ Gooey Chocolate', unit: 'pcs' },
+      { id: 'ice_hokkaido', name: 'ไอศกรีม ฮอกไกโด (Hokkaido)', unit: 'scoop' },
+      { id: 'ice_vanilla', name: 'ไอศกรีม วนิลา (Vanilla)', unit: 'scoop' },
+      { id: 'puff_osaka', name: 'Osaka Cream Puff', unit: 'pcs' },
+      { id: 'choux_cream', name: 'ชูครีม (Choux Cream)', unit: 'pcs' },
+    ],
+    items: [
+      ...soft.map(([id, n]) => item({ id, name: `ซอฟต์คุกกี้ ${n}`, categoryId: 'soft', mode: 'unit', price: 39, stockPool: id })),
+      ...cereal.map(([id, n]) => item({ id, name: `ซีเรียลคุกกี้ ${n}`, categoryId: 'cereal', mode: 'weight', pricePerGram: 1, minGrams: 20, stockPool: id })),
+      item({
+        id: 'gooey_set', name: 'Gooey Chocolate + Ice Cream', categoryId: 'gooey', mode: 'set', price: 59,
+        baseConsumes: [{ pool: 'gooey_cookie', qty: 1 }],
+        optionGroups: [
+          { id: 'g_main', name: 'เลือกไอศกรีมในเซ็ต (1 สกู๊ป)', type: 'pick1', options: [
+            { id: 'hokkaido', name: 'ฮอกไกโด', price: 0, pool: 'ice_hokkaido', qty: 1 },
+            { id: 'vanilla', name: 'วนิลา', price: 0, pool: 'ice_vanilla', qty: 1 },
+          ] },
+          { id: 'g_addice', name: 'Add-on เพิ่มไอศกรีม (คละรสได้)', type: 'stepper', options: [
+            { id: 'hokkaido', name: 'ไอศกรีมฮอกไกโด', price: 20, pool: 'ice_hokkaido', qty: 1 },
+            { id: 'vanilla', name: 'ไอศกรีมวนิลา', price: 20, pool: 'ice_vanilla', qty: 1 },
+          ] },
+          { id: 'g_addcookie', name: 'Add-on เพิ่มคุกกี้ Gooey Chocolate', type: 'stepper', options: [
+            { id: 'cookie', name: 'คุกกี้ Gooey', price: 39, pool: 'gooey_cookie', qty: 1 },
+          ] },
+        ],
+      }),
+      item({ id: 'puff_osaka', name: 'Osaka Cream Puff', categoryId: 'puff', mode: 'unit', price: 29, stockPool: 'puff_osaka', promoId: 'p_puff' }),
+      item({ id: 'choux_cream', name: 'ชูครีม (Choux Cream)', categoryId: 'puff', mode: 'unit', price: 12, stockPool: 'choux_cream', promoId: 'p_choux' }),
+    ],
+    promos: [
+      { id: 'p_soft', name: 'โปรซอฟต์คุกกี้ 3 ชิ้น 100', size: 3, price: 100, active: true },
+      { id: 'p_puff', name: 'โปรครีมพัฟ 4 ชิ้น 99', size: 4, price: 99, active: true },
+      { id: 'p_choux', name: 'โปรชูครีม 5 ชิ้น 50', size: 5, price: 50, active: true },
+    ],
+  };
+}
+
+/* ==========================================================================
+   3. ICONS (inline SVG — no network needed)
    ========================================================================== */
 
 const ICONS = {
@@ -123,7 +114,14 @@ const ICONS = {
   cloud: '<path d="M16 16l-4-4-4 4M12 12v9"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/>',
   left: '<path d="m15 18-6-6 6-6"/>',
   right: '<path d="m9 18 6-6-6-6"/>',
+  up: '<path d="m18 15-6-6-6 6"/>',
+  down: '<path d="m6 9 6 6 6-6"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
+  eye: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/>',
+  eyeoff: '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19M1 1l22 22"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/>',
+  tag: '<path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82Z"/><path d="M7 7h.01"/>',
+  folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2Z"/>',
+  menu: '<path d="M3 6h18M3 12h18M3 18h18"/>',
   cash: '<rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="2.5"/><path d="M6 12h.01M18 12h.01"/>',
   qr: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3"/>',
   gov: '<path d="M3 21h18M5 21V10M19 21V10M9 21v-7M15 21v-7M2 10l10-7 10 7Z"/>',
@@ -137,7 +135,7 @@ function svg(name, size = 22) {
 }
 
 /* ==========================================================================
-   3. UTILITIES
+   4. UTILITIES
    ========================================================================== */
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -145,7 +143,9 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const pad = (n, len = 2) => String(n).padStart(len, '0');
 const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const toInt = (v) => Math.max(0, Math.floor(Number(v) || 0));
+const num = (v) => { const n = parseFloat(v); return isFinite(n) ? round2(n) : 0; };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+const clone = (o) => JSON.parse(JSON.stringify(o));
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -157,16 +157,13 @@ function fmtNum(n) {
 const money = (n) => `฿${fmtNum(n)}`;
 const negMoney = (n) => (n > 0 ? `-฿${fmtNum(n)}` : '฿0');
 
-/** DD/MM/YYYY HH:mm:ss (local time) */
 function fmtDateTime(d) {
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
-/** YYYY-MM-DD (local date) */
 function dateKey(d) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 const todayKey = () => dateKey(new Date());
-/** ISO-8601 with local offset, e.g. 2026-11-14T13:05:22+07:00 */
 function isoLocal(d) {
   const off = -d.getTimezoneOffset();
   const sign = off >= 0 ? '+' : '-';
@@ -181,17 +178,119 @@ function fmtDateKeyTH(key) {
   const [y, m, d] = key.split('-');
   return `${d}/${m}/${y}`;
 }
+function setPath(obj, path, val) {
+  const ks = path.split('.');
+  let o = obj;
+  for (let i = 0; i < ks.length - 1; i++) o = o[ks[i]];
+  o[ks[ks.length - 1]] = val;
+}
+const sanitizePrefix = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 10);
 
 /* ==========================================================================
-   4. PERSISTENCE (localStorage for data, IndexedDB for images)
+   5. CATALOG MODEL
+   ========================================================================== */
+
+function normalizeItem(x) {
+  return {
+    id: String(x.id),
+    name: String(x.name || 'เมนูใหม่'),
+    categoryId: String(x.categoryId || ''),
+    mode: ['unit', 'weight', 'set'].includes(x.mode) ? x.mode : 'unit',
+    price: Math.max(0, num(x.price)),
+    pricePerGram: Math.max(0, num(x.pricePerGram == null ? 1 : x.pricePerGram)),
+    minGrams: Math.max(1, toInt(x.minGrams == null ? 20 : x.minGrams)),
+    stockPool: String(x.stockPool || ''),
+    tag: String(x.tag || ''),
+    promoId: String(x.promoId || ''),
+    availability: ['normal', 'soldout', 'hidden'].includes(x.availability) ? x.availability : 'normal',
+    soldOutDate: String(x.soldOutDate || ''),
+    baseConsumes: (x.baseConsumes || []).filter((b) => b && b.pool).map((b) => ({ pool: String(b.pool), qty: Math.max(1, toInt(b.qty) || 1) })),
+    optionGroups: (x.optionGroups || []).filter((g) => g && g.id).map((g) => ({
+      id: String(g.id),
+      name: String(g.name || 'ตัวเลือก'),
+      type: g.type === 'stepper' ? 'stepper' : 'pick1',
+      options: (g.options || []).filter((o) => o && o.id).map((o) => ({
+        id: String(o.id),
+        name: String(o.name || 'ตัวเลือก'),
+        price: Math.max(0, num(o.price)),
+        pool: String(o.pool || ''),
+        qty: Math.max(1, toInt(o.qty) || 1),
+      })),
+    })),
+  };
+}
+
+function normalizeCatalog(c) {
+  if (!c || typeof c !== 'object' || !Array.isArray(c.items)) return buildSeedCatalog();
+  const out = {
+    schema: 1,
+    updatedAt: String(c.updatedAt || ''),
+    categories: (c.categories || []).filter((x) => x && x.id).map((x) => ({
+      id: String(x.id), name: String(x.name || 'หมวดหมู่'), hidden: !!x.hidden, promoId: String(x.promoId || ''),
+    })),
+    pools: (c.pools || []).filter((x) => x && x.id).map((x) => ({
+      id: String(x.id), name: String(x.name || x.id), unit: UNIT_LABEL[x.unit] ? x.unit : 'pcs',
+    })),
+    promos: (c.promos || []).filter((x) => x && x.id).map((x) => ({
+      id: String(x.id), name: String(x.name || 'โปรโมชั่น'), size: Math.max(2, toInt(x.size) || 2),
+      price: Math.max(0, num(x.price)), active: x.active !== false,
+    })),
+    items: c.items.filter((x) => x && x.id).map(normalizeItem),
+  };
+  if (!out.categories.length) out.categories.push({ id: 'general', name: 'ทั่วไป', hidden: false, promoId: '' });
+  const catIds = new Set(out.categories.map((x) => x.id));
+  for (const it of out.items) if (!catIds.has(it.categoryId)) it.categoryId = out.categories[0].id;
+  return out;
+}
+
+/** Fast lookup maps — rebuilt after every catalog change. */
+let IDX = { cat: {}, item: {}, pool: {}, promo: {} };
+function reindex() {
+  const c = state.catalog;
+  const map = (arr) => Object.fromEntries(arr.map((x) => [x.id, x]));
+  IDX = { cat: map(c.categories), item: map(c.items), pool: map(c.pools), promo: map(c.promos) };
+}
+const poolName = (id) => (IDX.pool[id] ? IDX.pool[id].name : id);
+const poolUnit = (id) => (IDX.pool[id] ? UNIT_LABEL[IDX.pool[id].unit] : '');
+
+function itemAvailability(it) {
+  const cat = IDX.cat[it.categoryId];
+  if (it.availability === 'hidden' || (cat && cat.hidden)) return 'hidden';
+  if (it.availability === 'soldout' && it.soldOutDate === todayKey()) return 'soldout';
+  return 'normal';
+}
+function visibleCategories() {
+  return state.catalog.categories.filter((c) => !c.hidden);
+}
+function effectivePromo(it) {
+  if (!it || it.mode !== 'unit') return null;
+  let pid = it.promoId;
+  if (pid === 'none') return null;
+  if (!pid) { const c = IDX.cat[it.categoryId]; pid = c ? c.promoId : ''; }
+  const p = IDX.promo[pid];
+  return p && p.active ? p : null;
+}
+/** Which items reference a stock pool (for the stock manager & delete guard) */
+function poolRefs(poolId) {
+  return state.catalog.items.filter((it) =>
+    it.stockPool === poolId ||
+    it.baseConsumes.some((b) => b.pool === poolId) ||
+    it.optionGroups.some((g) => g.options.some((o) => o.pool === poolId)));
+}
+
+/* ==========================================================================
+   6. PERSISTENCE
    ========================================================================== */
 
 const LS = {
+  catalog: 'pos.v1.catalog',
   stock: 'pos.v1.stock',
   orders: 'pos.v1.orders',
   queue: 'pos.v1.queue',
   settings: 'pos.v1.settings',
   cart: 'pos.v1.cart',
+  syncMeta: 'pos.v1.syncMeta',
+  remote: 'pos.v1.remoteOrders',
 };
 
 function lsGet(key, fallback) {
@@ -214,44 +313,101 @@ function lsSet(key, value) {
   }
 }
 
-const defaultStock = () => Object.fromEntries(Object.keys(STOCK_ITEMS).map((k) => [k, 0]));
 const defaultSettings = () => ({
   gasUrl: '',
   shopName: 'Maysa.Meekanom',
-  deviceName: 'iPad-1',
+  shopSubtitle: 'HOMEMADE BAKERY & COOKIES',
+  devicePrefix: 'IPAD1',
+  autoPush: true,
+  autoPull: false,
   lastSyncAt: '',
   lastSyncError: '',
 });
+const defaultSyncMeta = () => ({
+  catalogDirty: 0, settingsDirty: 0, stockDirty: {}, imagesDirty: {},
+  lastPushAt: '', lastPullAt: '', lastStateError: '',
+});
 
-function sanitizeStock(obj) {
-  const s = defaultStock();
-  if (obj && typeof obj === 'object') for (const k of Object.keys(s)) s[k] = toInt(obj[k]);
+function sanitizeStock(obj, catalog) {
+  const s = {};
+  if (obj && typeof obj === 'object') for (const k of Object.keys(obj)) s[k] = toInt(obj[k]);
+  for (const p of catalog.pools) if (!(p.id in s)) s[p.id] = 0;
   return s;
 }
 
-const state = {
-  stock: sanitizeStock(lsGet(LS.stock, null)),
-  orders: lsGet(LS.orders, []),
-  queue: lsGet(LS.queue, []),
-  settings: Object.assign(defaultSettings(), lsGet(LS.settings, {})),
-  cart: Object.assign({ lines: [], manualDiscount: '' }, lsGet(LS.cart, {})),
-  images: {},
-  category: 'all',
-  syncing: false,
-};
-if (state.settings.shopName === 'Cookie POS') state.settings.shopName = 'Maysa.Meekanom';
-if (!Array.isArray(state.orders)) state.orders = [];
-if (!Array.isArray(state.queue)) state.queue = [];
-if (!Array.isArray(state.cart.lines)) state.cart.lines = [];
-state.cart.lines = state.cart.lines.filter((l) => l && MENU_BY_ID[l.menuId]);
+/* ---------- load + migrate ---------- */
+const state = (() => {
+  const rawCatalog = lsGet(LS.catalog, null);
+  const catalog = normalizeCatalog(rawCatalog);
+  const settings = Object.assign(defaultSettings(), lsGet(LS.settings, {}));
+  if (settings.shopName === 'Cookie POS') settings.shopName = 'Maysa.Meekanom';
+  if (!settings.devicePrefix || !/^[A-Z0-9]{1,10}$/.test(settings.devicePrefix)) {
+    settings.devicePrefix = sanitizePrefix(settings.deviceName) || 'IPAD1';
+  }
+  const cart = Object.assign({ lines: [], manualDiscount: '' }, lsGet(LS.cart, {}));
+  const orders = lsGet(LS.orders, []);
+  const queue = lsGet(LS.queue, []);
+  return {
+    catalog,
+    migrated: !rawCatalog,
+    stock: sanitizeStock(lsGet(LS.stock, null), catalog),
+    orders: Array.isArray(orders) ? orders : [],
+    queue: Array.isArray(queue) ? queue : [],
+    settings,
+    syncMeta: Object.assign(defaultSyncMeta(), lsGet(LS.syncMeta, {})),
+    remoteOrders: lsGet(LS.remote, {}) || {},
+    cart: { lines: Array.isArray(cart.lines) ? cart.lines : [], manualDiscount: cart.manualDiscount || '' },
+    images: {},
+    category: 'all',
+    syncing: false,
+    cloudBusy: false,
+  };
+})();
+reindex();
 
 const save = {
+  catalog: () => lsSet(LS.catalog, state.catalog),
   stock: () => lsSet(LS.stock, state.stock),
   orders: () => lsSet(LS.orders, state.orders),
   queue: () => lsSet(LS.queue, state.queue),
   settings: () => lsSet(LS.settings, state.settings),
   cart: () => lsSet(LS.cart, state.cart),
+  syncMeta: () => lsSet(LS.syncMeta, state.syncMeta),
+  remote: () => lsSet(LS.remote, state.remoteOrders),
 };
+
+/** v1 cart lines (cereal / gooey) → v2 (weight / set). Drops lines whose item no longer exists. */
+function sanitizeCart() {
+  state.cart.lines = state.cart.lines.map((l) => {
+    if (!l) return null;
+    if (l.type === 'cereal') return { id: l.id, type: 'weight', menuId: l.menuId, soldG: toInt(l.soldG), freeG: toInt(l.freeG), disc: toInt(l.disc) };
+    if (l.type === 'gooey') {
+      return {
+        id: l.id, type: 'set', menuId: 'gooey_set', qty: Math.max(1, toInt(l.qty)),
+        picks: { g_main: l.main },
+        adds: { g_addice: { hokkaido: toInt(l.addH), vanilla: toInt(l.addV) }, g_addcookie: { cookie: toInt(l.addC) } },
+      };
+    }
+    return l;
+  }).filter((l) => {
+    if (!l) return false;
+    const it = IDX.item[l.menuId];
+    if (!it || it.mode !== l.type) return false;
+    if (l.type === 'set') {
+      l.picks = l.picks || {};
+      l.adds = l.adds || {};
+      for (const g of it.optionGroups) {
+        if (g.type === 'pick1' && g.options.length && !g.options.some((o) => o.id === l.picks[g.id])) return false;
+        if (g.type === 'stepper') {
+          const a = l.adds[g.id] || {};
+          for (const k of Object.keys(a)) if (!g.options.some((o) => o.id === k)) delete a[k];
+        }
+      }
+    }
+    return true;
+  });
+}
+sanitizeCart();
 
 /* ---------- IndexedDB image store (falls back to localStorage) ---------- */
 const ImageStore = (() => {
@@ -295,7 +451,6 @@ const ImageStore = (() => {
     } catch (e) {
       console.warn('IDB getAll failed, using localStorage', e);
     }
-    // merge any localStorage fallback images
     for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
       if (k && k.startsWith(LS_PREFIX) && !out[k.slice(LS_PREFIX.length)]) out[k.slice(LS_PREFIX.length)] = localStorage.getItem(k);
@@ -322,57 +477,87 @@ const ImageStore = (() => {
   return { getAll, put, remove, clear };
 })();
 
-/** Resize + center-crop to a square JPEG data URL (default 300×300) */
-function compressImage(file, size = 300, quality = 0.82) {
+/**
+ * Resize + center-crop to a square JPEG data URL (250×250, q 0.72).
+ * Accepts a File/Blob or an existing data URL. Shrinks further until < IMG_MAX_CHARS
+ * so every image fits in a single Google Sheets cell.
+ */
+function compressImage(source, size = IMG_SIZE, quality = IMG_QUALITY) {
   return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
+    const isString = typeof source === 'string';
+    const url = isString ? source : URL.createObjectURL(source);
     const img = new Image();
     img.onload = () => {
       try {
         const w = img.naturalWidth, h = img.naturalHeight;
         const s = Math.min(w, h);
         const canvas = document.createElement('canvas');
-        canvas.width = canvas.height = size;
         const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#fffdf9';
-        ctx.fillRect(0, 0, size, size);
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(img, (w - s) / 2, (h - s) / 2, s, s, 0, 0, size, size);
+        const draw = (px) => {
+          canvas.width = canvas.height = px;
+          ctx.fillStyle = '#fffdf9';
+          ctx.fillRect(0, 0, px, px);
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.drawImage(img, (w - s) / 2, (h - s) / 2, s, s, 0, 0, px, px);
+        };
+        let px = size;
+        draw(px);
         let q = quality;
         let data = canvas.toDataURL('image/jpeg', q);
-        while (data.length > 70000 && q > 0.45) { // keep each image ≲ 50 KB
-          q -= 0.1;
-          data = canvas.toDataURL('image/jpeg', q);
-        }
+        while (data.length > IMG_MAX_CHARS && q > 0.5) { q -= 0.07; data = canvas.toDataURL('image/jpeg', q); }
+        while (data.length > IMG_MAX_CHARS && px > 120) { px -= 30; draw(px); data = canvas.toDataURL('image/jpeg', 0.6); }
         resolve(data);
       } catch (e) {
         reject(e);
       } finally {
-        URL.revokeObjectURL(url);
+        if (!isString) URL.revokeObjectURL(url);
       }
     };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('ไม่สามารถอ่านไฟล์รูปภาพนี้ได้')); };
+    img.onerror = () => { if (!isString) URL.revokeObjectURL(url); reject(new Error('ไม่สามารถอ่านไฟล์รูปภาพนี้ได้')); };
     img.src = url;
   });
 }
 
+/** v1 images were up to ~70k chars — shrink them once so they fit a Sheets cell. */
+async function shrinkLegacyImages() {
+  for (const [id, data] of Object.entries(state.images)) {
+    if (typeof data === 'string' && data.length > IMG_MAX_CHARS + 2000) {
+      try {
+        const small = await compressImage(data);
+        await ImageStore.put(id, small);
+        state.images[id] = small;
+      } catch (e) { console.warn('shrink failed', id, e); }
+    }
+  }
+}
+
 /* ==========================================================================
-   5. CART ENGINE (stock needs, pricing, promotions)
+   7. CART ENGINE (stock needs, pricing, promotions)
    ========================================================================== */
 
-/** Stock that a single cart line consumes: { stockKey: amount } */
+const findOpt = (g, oid) => g.options.find((o) => o.id === oid);
+
+/** Stock consumed by one cart line: { poolId: amount } (untracked items consume nothing) */
 function lineNeeds(line) {
   const n = {};
-  const add = (k, v) => { if (v > 0) n[k] = (n[k] || 0) + v; };
-  const m = MENU_BY_ID[line.menuId];
-  if (line.type === 'unit') add(m.stockKey, line.qty);
-  else if (line.type === 'cereal') add(m.stockKey, line.soldG + line.freeG);
-  else if (line.type === 'gooey') {
+  const add = (k, v) => { if (k && v > 0) n[k] = (n[k] || 0) + v; };
+  const it = IDX.item[line.menuId];
+  if (!it) return n;
+  if (line.type === 'unit') add(it.stockPool, line.qty);
+  else if (line.type === 'weight') add(it.stockPool, line.soldG + line.freeG);
+  else if (line.type === 'set') {
     const q = line.qty;
-    add('gooey_cookie', q * (1 + line.addC));
-    add(ICE.hokkaido.key, q * ((line.main === 'hokkaido' ? 1 : 0) + line.addH));
-    add(ICE.vanilla.key, q * ((line.main === 'vanilla' ? 1 : 0) + line.addV));
+    for (const b of it.baseConsumes) add(b.pool, q * b.qty);
+    for (const g of it.optionGroups) {
+      if (g.type === 'pick1') {
+        const o = findOpt(g, (line.picks || {})[g.id]);
+        if (o) add(o.pool, q * o.qty);
+      } else {
+        const a = (line.adds || {})[g.id] || {};
+        for (const o of g.options) add(o.pool, q * (a[o.id] || 0) * o.qty);
+      }
+    }
   }
   return n;
 }
@@ -380,16 +565,15 @@ function mergeNeeds(target, src) {
   for (const k in src) target[k] = (target[k] || 0) + src[k];
   return target;
 }
-/** Total stock reserved by the cart (optionally excluding one line being edited) */
 function cartNeeds(excludeLineId) {
   const t = {};
   for (const l of state.cart.lines) if (l.id !== excludeLineId) mergeNeeds(t, lineNeeds(l));
   return t;
 }
-function availableOf(key, reserved) {
-  return (state.stock[key] || 0) - ((reserved || cartNeeds())[key] || 0);
+function availableOf(pool, reserved) {
+  if (!pool) return Infinity;
+  return (state.stock[pool] || 0) - ((reserved || cartNeeds())[pool] || 0);
 }
-/** Returns shortages if `needs` were added on top of the cart (minus excluded line). */
 function findShortages(needs, excludeLineId) {
   const reserved = cartNeeds(excludeLineId);
   const out = [];
@@ -399,7 +583,6 @@ function findShortages(needs, excludeLineId) {
   }
   return out;
 }
-/** Shortages for the whole cart vs. current stock */
 function cartShortages() {
   const t = cartNeeds();
   const out = [];
@@ -407,75 +590,160 @@ function cartShortages() {
   return out;
 }
 function shortageText(list) {
-  return list.map((s) => `${STOCK_ITEMS[s.key].name} (ต้องการ ${fmtNum(s.need)} มี ${fmtNum(s.have)} ${UNIT_LABEL[STOCK_ITEMS[s.key].unit]})`).join(', ');
+  return list.map((s) => `${poolName(s.key)} (ต้องการ ${fmtNum(s.need)} มี ${fmtNum(s.have)} ${poolUnit(s.key)})`).join(', ');
 }
 
-function gooeySetPrice(line) {
-  return GOOEY.basePrice + GOOEY.extraScoop * (line.addH + line.addV) + GOOEY.extraCookie * line.addC;
+function setUnitPrice(it, line) {
+  let p = it.price;
+  for (const g of it.optionGroups) {
+    if (g.type === 'pick1') {
+      const o = findOpt(g, (line.picks || {})[g.id]);
+      if (o) p += o.price;
+    } else {
+      const a = (line.adds || {})[g.id] || {};
+      for (const o of g.options) p += (a[o.id] || 0) * o.price;
+    }
+  }
+  return round2(p);
 }
 function lineGross(line) {
-  const m = MENU_BY_ID[line.menuId];
-  if (line.type === 'unit') return m.price * line.qty;
-  if (line.type === 'cereal') return line.soldG * m.pricePerGram;
-  if (line.type === 'gooey') return gooeySetPrice(line) * line.qty;
+  const it = IDX.item[line.menuId];
+  if (!it) return 0;
+  if (line.type === 'unit') return round2(it.price * line.qty);
+  if (line.type === 'weight') return round2(line.soldG * it.pricePerGram);
+  if (line.type === 'set') return round2(setUnitPrice(it, line) * line.qty);
   return 0;
 }
 function lineItemDiscount(line) {
-  return line.type === 'cereal' ? Math.min(toInt(line.disc), lineGross(line)) : 0;
+  return line.type === 'weight' ? Math.min(toInt(line.disc), lineGross(line)) : 0;
 }
 function lineTitle(line) {
-  return MENU_BY_ID[line.menuId].fullName;
+  const it = IDX.item[line.menuId];
+  return it ? it.name : line.menuId;
+}
+function setSelections(it, line) {
+  const options = [];
+  const addOns = [];
+  for (const g of it.optionGroups) {
+    if (g.type === 'pick1') {
+      const o = findOpt(g, (line.picks || {})[g.id]);
+      if (o) options.push(o.name);
+    } else {
+      const a = (line.adds || {})[g.id] || {};
+      for (const o of g.options) if (a[o.id]) addOns.push({ name: o.name, n: a[o.id], price: o.price });
+    }
+  }
+  return { options, addOns };
 }
 function lineDetail(line) {
-  const m = MENU_BY_ID[line.menuId];
-  if (line.type === 'unit') return `${line.qty} × ${money(m.price)}`;
-  if (line.type === 'cereal') {
-    const parts = [`ขาย ${fmtNum(line.soldG)} ก. (${money(line.soldG * m.pricePerGram)})`];
+  const it = IDX.item[line.menuId];
+  if (!it) return '';
+  if (line.type === 'unit') return `${line.qty} × ${money(it.price)}`;
+  if (line.type === 'weight') {
+    const parts = [`ขาย ${fmtNum(line.soldG)} ก. (${money(line.soldG * it.pricePerGram)})`];
     if (line.freeG > 0) parts.push(`แถม ${fmtNum(line.freeG)} ก.`);
     if (line.disc > 0) parts.push(`ลดรายการ ${money(line.disc)}`);
     return parts.join(' · ');
   }
-  if (line.type === 'gooey') {
-    const parts = [`ไอศกรีมหลัก ${ICE[line.main].name}`];
-    if (line.addH) parts.push(`+ฮอกไกโด ${line.addH} สกู๊ป`);
-    if (line.addV) parts.push(`+วนิลา ${line.addV} สกู๊ป`);
-    if (line.addC) parts.push(`+คุกกี้ Gooey ${line.addC} ชิ้น`);
-    return `${parts.join(' · ')} — ${line.qty} × ${money(gooeySetPrice(line))}`;
-  }
-  return '';
+  const sel = setSelections(it, line);
+  const parts = [...sel.options, ...sel.addOns.map((a) => `+${a.name} ×${a.n}`)];
+  return `${parts.join(' · ')}${parts.length ? ' — ' : ''}${line.qty} × ${money(setUnitPrice(it, line))}`;
 }
-const lineCount = (l) => (l.type === 'cereal' ? 1 : l.qty);
+const lineCount = (l) => (l.type === 'weight' ? 1 : l.qty);
 
-/** Full bill calculation */
+/**
+ * Bill calculation. Mix-and-match bundles: units in the same promo are sorted by price
+ * (highest first) and grouped into bundles of `size`; each bundle costs `price`.
+ */
 function calcTotals(lines, manualInput) {
   const subtotal = round2(lines.reduce((s, l) => s + lineGross(l), 0));
-  const counts = { soft: 0, puff: 0, choux: 0 };
+  const groups = {};
   for (const l of lines) {
     if (l.type !== 'unit') continue;
-    const p = MENU_BY_ID[l.menuId].promo;
-    if (p) counts[p] += l.qty;
+    const it = IDX.item[l.menuId];
+    const p = effectivePromo(it);
+    if (!p) continue;
+    groups[p.id] = groups[p.id] || [];
+    for (let i = 0; i < l.qty; i++) groups[p.id].push(it.price);
   }
-  const promos = Object.keys(PROMOS).map((key) => {
-    const p = PROMOS[key];
-    const bundles = Math.floor(counts[key] / p.size);
-    return { key, label: p.label, bundles, discount: bundles * p.discount };
-  }).filter((p) => p.bundles > 0);
-  const promoDiscount = promos.reduce((s, p) => s + p.discount, 0);
+  const promos = state.catalog.promos.filter((p) => groups[p.id]).map((p) => {
+    const prices = groups[p.id].sort((a, b) => b - a);
+    const bundles = Math.floor(prices.length / p.size);
+    let discount = 0;
+    for (let b = 0; b < bundles; b++) {
+      const sum = prices.slice(b * p.size, (b + 1) * p.size).reduce((s, x) => s + x, 0);
+      discount += Math.max(0, sum - p.price);
+    }
+    return { key: p.id, label: p.name, bundles, discount: round2(discount) };
+  }).filter((p) => p.bundles > 0 && p.discount > 0);
+  const promoDiscount = round2(promos.reduce((s, p) => s + p.discount, 0));
   const itemDiscount = round2(lines.reduce((s, l) => s + lineItemDiscount(l), 0));
   const afterAuto = Math.max(0, round2(subtotal - promoDiscount - itemDiscount));
   const manualRequested = Math.max(0, round2(parseFloat(manualInput) || 0));
   const manualDiscount = Math.min(manualRequested, afterAuto);
-  const net = round2(afterAuto - manualDiscount);
   return {
     subtotal, promos, promoDiscount, itemDiscount,
     manualRequested, manualDiscount,
     totalDiscount: round2(promoDiscount + itemDiscount + manualDiscount),
-    net,
+    net: round2(afterAuto - manualDiscount),
+  };
+}
+
+/** Max number of sets the given stock function allows (required picks + base consumption). */
+function setCapacity(it, avail) {
+  let cap = Infinity;
+  for (const b of it.baseConsumes) cap = Math.min(cap, Math.floor(avail(b.pool) / b.qty));
+  for (const g of it.optionGroups) {
+    if (g.type !== 'pick1' || !g.options.length) continue;
+    let s = 0;
+    for (const o of g.options) s += o.pool ? Math.max(0, Math.floor(avail(o.pool) / o.qty)) : Infinity;
+    cap = Math.min(cap, s);
+  }
+  return cap;
+}
+
+function menuStatus(it, reserved) {
+  const av = (p) => (p ? (state.stock[p] || 0) - (reserved[p] || 0) : Infinity);
+  const real = (p) => (p ? state.stock[p] || 0 : Infinity);
+  const manual = itemAvailability(it) === 'soldout';
+  if (it.mode === 'unit') {
+    const a = av(it.stockPool);
+    return {
+      soldOut: manual || real(it.stockPool) <= 0,
+      blocked: a <= 0,
+      manual,
+      badge: it.stockPool ? `คงเหลือ ${fmtNum(Math.max(0, a))} ${poolUnit(it.stockPool)}` : 'พร้อมขาย',
+      low: isFinite(a) && a > 0 && a <= 5,
+    };
+  }
+  if (it.mode === 'weight') {
+    const a = av(it.stockPool);
+    return {
+      soldOut: manual || real(it.stockPool) < it.minGrams,
+      blocked: a < it.minGrams,
+      manual,
+      badge: it.stockPool ? `${fmtNum(Math.max(0, a))} กรัม` : 'พร้อมขาย',
+      low: isFinite(a) && a >= it.minGrams && a < 200,
+    };
+  }
+  const sets = setCapacity(it, av);
+  const parts = [];
+  for (const b of it.baseConsumes) parts.push(`${poolName(b.pool)} ${fmtNum(Math.max(0, av(b.pool)))}`);
+  for (const g of it.optionGroups) {
+    if (g.type === 'pick1') for (const o of g.options) if (o.pool) parts.push(`${o.name} ${fmtNum(Math.max(0, av(o.pool)))}`);
+  }
+  return {
+    soldOut: manual || setCapacity(it, real) <= 0,
+    blocked: sets <= 0,
+    manual,
+    badge: isFinite(sets) ? `คงเหลือ ${Math.max(0, sets)} เซ็ต` : 'พร้อมขาย',
+    low: isFinite(sets) && sets > 0 && sets <= 3,
+    sub: parts.join(' · '),
   };
 }
 
 /* ==========================================================================
-   6. TOASTS & MODALS
+   8. TOASTS & MODALS
    ========================================================================== */
 
 function toast(msg, type = '', ms = 2600) {
@@ -492,6 +760,13 @@ function toast(msg, type = '', ms = 2600) {
 function openModal(id) { $(`#${id}`).classList.add('open'); }
 function closeModal(id) { $(`#${id}`).classList.remove('open'); }
 const isOpen = (id) => $(`#${id}`).classList.contains('open');
+
+/** Re-render a modal body without losing scroll position */
+function paint(el, html) {
+  const top = el.scrollTop;
+  el.innerHTML = html;
+  el.scrollTop = top;
+}
 
 function confirmDialog({ title = 'ยืนยัน', html = '', okText = 'ยืนยัน', cancelText = 'ยกเลิก', danger = false, input = null }) {
   return new Promise((resolve) => {
@@ -516,103 +791,91 @@ function confirmDialog({ title = 'ยืนยัน', html = '', okText = 'ย�
 }
 
 /* ==========================================================================
-   7. RENDER — HEADER, MENU, CART
+   9. RENDER — HEADER, MENU, CART
    ========================================================================== */
 
 function renderClock() {
-  const d = new Date();
-  const s = fmtDateTime(d).split(' ');
+  const s = fmtDateTime(new Date()).split(' ');
   $('#clockDate').textContent = s[0];
   $('#clockTime').textContent = s[1];
 }
 
+function hasStateChanges() {
+  const m = state.syncMeta;
+  return !!(m.catalogDirty || m.settingsDirty || Object.keys(m.stockDirty).length || Object.keys(m.imagesDirty).length);
+}
+
 function renderHeader() {
-  $('#shopName').textContent = state.settings.shopName || 'Maysa.Meekanom';
-  document.title = state.settings.shopName || 'Maysa.Meekanom';
+  const s = state.settings;
+  $('#shopName').textContent = s.shopName || 'Maysa.Meekanom';
+  $('#shopSub').textContent = s.shopSubtitle || '';
+  document.title = s.shopName || 'Maysa.Meekanom';
   const online = navigator.onLine;
   const badge = $('#netBadge');
   badge.textContent = online ? 'Online' : 'Offline';
   badge.classList.toggle('offline', !online);
 
-  const n = state.queue.length;
+  const n = state.queue.length + (hasStateChanges() ? 1 : 0);
+  const busy = state.syncing || state.cloudBusy;
   const btn = $('#btnSync');
   btn.classList.toggle('pending', n > 0);
-  btn.classList.toggle('syncing', state.syncing);
-  $('#syncLabel').textContent = state.syncing ? `กำลัง Sync (${n})…` : (n ? `Sync Pending (${n})` : 'Synced ✓');
-}
-
-function menuStatus(m, reserved) {
-  const S = state.stock;
-  if (m.type === 'unit') {
-    const avail = availableOf(m.stockKey, reserved);
-    return {
-      soldOut: S[m.stockKey] <= 0,
-      blocked: avail <= 0,
-      badge: `คงเหลือ ${fmtNum(Math.max(0, avail))} ชิ้น`,
-      low: avail > 0 && avail <= 5,
-    };
-  }
-  if (m.type === 'cereal') {
-    const avail = availableOf(m.stockKey, reserved);
-    return {
-      soldOut: S[m.stockKey] < CEREAL_MIN_G,
-      blocked: avail < CEREAL_MIN_G,
-      badge: `${fmtNum(Math.max(0, avail))} กรัม`,
-      low: avail >= CEREAL_MIN_G && avail < 200,
-    };
-  }
-  // gooey set
-  const c = availableOf('gooey_cookie', reserved);
-  const h = availableOf(ICE.hokkaido.key, reserved);
-  const v = availableOf(ICE.vanilla.key, reserved);
-  const sets = Math.max(0, Math.min(c, h + v));
-  return {
-    soldOut: S.gooey_cookie <= 0 || (S.ice_hokkaido <= 0 && S.ice_vanilla <= 0),
-    blocked: c <= 0 || (h <= 0 && v <= 0),
-    badge: `คงเหลือ ${sets} เซ็ต`,
-    low: sets > 0 && sets <= 3,
-    sub: `คุกกี้ ${Math.max(0, c)} · ฮอกไกโด ${Math.max(0, h)} · วนิลา ${Math.max(0, v)}`,
-  };
+  btn.classList.toggle('syncing', busy);
+  $('#syncLabel').textContent = busy ? 'กำลัง Sync…' : (n ? `Sync Pending (${n})` : 'Synced ✓');
 }
 
 function renderTabs() {
-  $('#catTabs').innerHTML = CATEGORIES.map((c) => {
-    const cnt = c.id === 'all' ? MENU.length : MENU.filter((m) => m.cat === c.id).length;
-    return `<button class="cat-tab ${state.category === c.id ? 'active' : ''}" data-cat="${c.id}" type="button">${esc(c.name)}<span class="cnt">${cnt}</span></button>`;
-  }).join('');
+  const cats = visibleCategories();
+  if (state.category !== 'all' && !cats.some((c) => c.id === state.category)) state.category = 'all';
+  const count = (cid) => state.catalog.items.filter((it) => (cid === 'all' || it.categoryId === cid) && itemAvailability(it) !== 'hidden').length;
+  $('#catTabs').innerHTML = [{ id: 'all', name: 'ทั้งหมด' }, ...cats].map((c) =>
+    `<button class="cat-tab ${state.category === c.id ? 'active' : ''}" data-cat="${esc(c.id)}" type="button">${esc(c.name)}<span class="cnt">${count(c.id)}</span></button>`).join('');
+}
+
+function cardTag(it) {
+  if (it.tag) return it.tag;
+  const p = effectivePromo(it);
+  if (p) return `${p.size} ชิ้น ฿${fmtNum(p.price)}`;
+  if (it.mode === 'weight') return 'ชั่งน้ำหนัก';
+  if (it.mode === 'set') return 'เซ็ต';
+  return '';
+}
+function priceHtml(it) {
+  if (it.mode === 'weight') return `${money(it.pricePerGram)}<small> / กรัม</small>`;
+  if (it.mode === 'set') return `${money(it.price)}<small> / เซ็ต</small>`;
+  return money(it.price);
 }
 
 function renderMenu() {
   const reserved = cartNeeds();
   const inCart = {};
   for (const l of state.cart.lines) inCart[l.menuId] = (inCart[l.menuId] || 0) + lineCount(l);
-  const items = MENU.filter((m) => state.category === 'all' || m.cat === state.category);
+  const catOrder = Object.fromEntries(state.catalog.categories.map((c, i) => [c.id, i]));
+  const items = state.catalog.items
+    .filter((it) => itemAvailability(it) !== 'hidden' && (state.category === 'all' || it.categoryId === state.category))
+    .sort((a, b) => (catOrder[a.categoryId] - catOrder[b.categoryId]));
 
-  $('#menuGrid').innerHTML = items.map((m) => {
-    const st = menuStatus(m, reserved);
-    const img = state.images[m.id];
-    const priceHtml = m.type === 'cereal'
-      ? `${money(m.pricePerGram)}<small> / กรัม</small>`
-      : m.type === 'gooey' ? `${money(m.price)}<small> / เซ็ต</small>` : money(m.price);
-    const cls = ['menu-card', st.soldOut ? 'is-soldout' : '', !st.soldOut && st.blocked ? 'is-blocked' : '', inCart[m.id] ? 'in-cart' : ''].join(' ');
+  $('#menuGrid').innerHTML = items.length ? items.map((it) => {
+    const st = menuStatus(it, reserved);
+    const img = state.images[it.id];
+    const tag = cardTag(it);
+    const cls = ['menu-card', st.soldOut ? 'is-soldout' : '', !st.soldOut && st.blocked ? 'is-blocked' : '', inCart[it.id] ? 'in-cart' : ''].join(' ');
     return `
-      <button class="${cls}" data-menu="${m.id}" type="button" aria-disabled="${st.soldOut || st.blocked}">
+      <button class="${cls}" data-menu="${esc(it.id)}" type="button" aria-disabled="${st.soldOut || st.blocked}">
         <div class="card-img">
           ${img ? `<img src="${img}" alt="" loading="lazy" />` : `${svg('cookie', 46)}<span>ยังไม่มีรูป</span>`}
-          ${m.tag ? `<span class="promo-tag">${esc(m.tag)}</span>` : ''}
+          ${tag ? `<span class="promo-tag">${esc(tag)}</span>` : ''}
           <span class="stock-badge ${st.low ? 'low' : ''}">${esc(st.badge)}</span>
-          ${inCart[m.id] && !st.soldOut ? `<span class="qty-tag">${inCart[m.id]}</span>` : ''}
+          ${inCart[it.id] && !st.soldOut ? `<span class="qty-tag">${inCart[it.id]}</span>` : ''}
           ${!st.soldOut && st.blocked ? '<span class="blocked-note">สต็อกทั้งหมดอยู่ในตะกร้าแล้ว</span>' : ''}
         </div>
-        ${st.soldOut ? '<div class="soldout-overlay"><span>SOLD OUT</span></div>' : ''}
+        ${st.soldOut ? `<div class="soldout-overlay"><span>SOLD OUT${st.manual ? '<small>ปิดขายวันนี้</small>' : ''}</span></div>` : ''}
         <div class="card-body">
-          <div class="card-cat">${esc(CATEGORY_NAME[m.cat])}</div>
-          <div class="card-name">${esc(m.name)}</div>
+          <div class="card-name">${esc(it.name)}</div>
           ${st.sub ? `<div class="card-sub">${esc(st.sub)}</div>` : ''}
-          <div class="card-price">${priceHtml}</div>
+          <div class="card-price">${priceHtml(it)}</div>
         </div>
       </button>`;
-  }).join('');
+  }).join('') : `<div class="empty-state" style="grid-column:1/-1">${svg('cookie', 48)}<p>ยังไม่มีเมนูในหมวดนี้ — เพิ่มได้ที่ “จัดการเมนู &amp; สต็อก”</p></div>`;
 }
 
 function renderCart() {
@@ -627,13 +890,13 @@ function renderCart() {
       const gross = lineGross(l);
       const disc = lineItemDiscount(l);
       const editBtn = `<button class="icon-btn" data-act="edit" data-id="${l.id}" type="button" aria-label="แก้ไข">${svg('edit')}</button>`;
-      const controls = l.type === 'cereal'
+      const controls = l.type === 'weight'
         ? editBtn
         : `<div class="stepper">
              <button data-act="dec" data-id="${l.id}" type="button" aria-label="ลด">${svg('minus')}</button>
              <span class="qty">${l.qty}</span>
              <button data-act="inc" data-id="${l.id}" type="button" aria-label="เพิ่ม">${svg('plus')}</button>
-           </div>${l.type === 'gooey' ? editBtn : ''}`;
+           </div>${l.type === 'set' ? editBtn : ''}`;
       return `
         <div class="cart-line">
           <div class="cl-top">
@@ -653,7 +916,6 @@ function renderCart() {
 function renderTotals() {
   const t = calcTotals(state.cart.lines, state.cart.manualDiscount);
   $('#sumSubtotal').textContent = money(t.subtotal);
-
   let html = '';
   if (!t.promos.length) {
     html += `<div class="sum-row muted"><span>ส่วนลดโปรโมชั่นอัตโนมัติ</span><span>฿0</span></div>`;
@@ -661,11 +923,8 @@ function renderTotals() {
     html += `<div class="sum-row discount"><span>ส่วนลดโปรโมชั่นอัตโนมัติ</span><span>${negMoney(t.promoDiscount)}</span></div>`;
     html += t.promos.map((p) => `<div class="sum-row sub"><span>• ${esc(p.label)} × ${p.bundles}</span><span>${negMoney(p.discount)}</span></div>`).join('');
   }
-  if (t.itemDiscount > 0) {
-    html += `<div class="sum-row discount"><span>ส่วนลดเฉพาะรายการ (ซีเรียลคุกกี้)</span><span>${negMoney(t.itemDiscount)}</span></div>`;
-  }
+  if (t.itemDiscount > 0) html += `<div class="sum-row discount"><span>ส่วนลดเฉพาะรายการ</span><span>${negMoney(t.itemDiscount)}</span></div>`;
   $('#promoRows').innerHTML = html;
-
   $('#manualNote').textContent = t.manualRequested > t.manualDiscount
     ? `ส่วนลดเพิ่มเติมถูกจำกัดไว้ที่ ${money(t.manualDiscount)} (ไม่เกินยอดคงเหลือ)` : '';
   $('#sumNet').textContent = money(t.net);
@@ -674,6 +933,7 @@ function renderTotals() {
 
 function renderAll() {
   renderHeader();
+  renderTabs();
   renderMenu();
   renderCart();
 }
@@ -685,25 +945,25 @@ function cartChanged() {
 }
 
 /* ==========================================================================
-   8. CART ACTIONS
+   10. CART ACTIONS
    ========================================================================== */
 
 function onMenuTap(menuId) {
-  const m = MENU_BY_ID[menuId];
-  if (!m) return;
-  const st = menuStatus(m, cartNeeds());
-  if (st.soldOut) return toast(`${m.fullName} — SOLD OUT`, 'error');
+  const it = IDX.item[menuId];
+  if (!it) return;
+  const st = menuStatus(it, cartNeeds());
+  if (st.soldOut) return toast(`${it.name} — SOLD OUT`, 'error');
   if (st.blocked) return toast('สต็อกคงเหลือทั้งหมดอยู่ในตะกร้าแล้ว', 'warn');
-  if (m.type === 'unit') addUnit(m);
-  else if (m.type === 'cereal') openCereal(menuId, null);
-  else openGooey(null);
+  if (it.mode === 'unit') addUnit(it);
+  else if (it.mode === 'weight') openWeight(menuId, null);
+  else openSet(menuId, null);
 }
 
-function addUnit(m) {
-  if (findShortages({ [m.stockKey]: 1 }).length) return toast('สต็อกไม่พอ', 'error');
-  const line = state.cart.lines.find((l) => l.type === 'unit' && l.menuId === m.id);
+function addUnit(it) {
+  if (it.stockPool && findShortages({ [it.stockPool]: 1 }).length) return toast('สต็อกไม่พอ', 'error');
+  const line = state.cart.lines.find((l) => l.type === 'unit' && l.menuId === it.id);
   if (line) line.qty += 1;
-  else state.cart.lines.push({ id: uid(), type: 'unit', menuId: m.id, qty: 1 });
+  else state.cart.lines.push({ id: uid(), type: 'unit', menuId: it.id, qty: 1 });
   cartChanged();
   const count = $('#cartCount');
   count.classList.remove('bump'); void count.offsetWidth; count.classList.add('bump');
@@ -711,10 +971,9 @@ function addUnit(m) {
 
 function changeQty(lineId, delta) {
   const line = state.cart.lines.find((l) => l.id === lineId);
-  if (!line || line.type === 'cereal') return;
+  if (!line || line.type === 'weight') return;
   if (delta > 0) {
-    const one = lineNeeds(Object.assign({}, line, { qty: 1 }));
-    const short = findShortages(one);
+    const short = findShortages(lineNeeds(Object.assign({}, line, { qty: 1 })));
     if (short.length) return toast(`สต็อกไม่พอ: ${shortageText(short)}`, 'error', 3500);
     line.qty += 1;
   } else {
@@ -740,13 +999,13 @@ async function clearCart() {
 }
 
 /* ==========================================================================
-   9. CEREAL COOKIE MODAL (weight / giveaway / item discount + numpad)
+   11. BY-WEIGHT MODAL (sold grams / giveaway grams / item discount + numpad)
    ========================================================================== */
 
-let cerealCtx = null;
+let weightCtx = null;
 
-function openCereal(menuId, editLine) {
-  cerealCtx = {
+function openWeight(menuId, editLine) {
+  weightCtx = {
     menuId,
     editId: editLine ? editLine.id : null,
     f: {
@@ -756,57 +1015,55 @@ function openCereal(menuId, editLine) {
     },
     active: 'sold',
   };
-  renderCereal();
-  openModal('m-cereal');
+  renderWeight();
+  openModal('m-weight');
 }
 
-function cerealCalc() {
-  const m = MENU_BY_ID[cerealCtx.menuId];
-  const sold = toInt(cerealCtx.f.sold);
-  const free = toInt(cerealCtx.f.free);
-  const disc = toInt(cerealCtx.f.disc);
-  const available = availableOf(m.stockKey, cerealCtx.editId === null ? cartNeeds() : cartNeeds(cerealCtx.editId));
-  const price = sold * m.pricePerGram;
+function weightCalc() {
+  const it = IDX.item[weightCtx.menuId];
+  const sold = toInt(weightCtx.f.sold);
+  const free = toInt(weightCtx.f.free);
+  const disc = toInt(weightCtx.f.disc);
+  const available = availableOf(it.stockPool, cartNeeds(weightCtx.editId));
+  const price = round2(sold * it.pricePerGram);
   const errors = [];
-  if (sold < CEREAL_MIN_G) errors.push(`น้ำหนักที่ขายต้องไม่น้อยกว่า ${CEREAL_MIN_G} กรัม`);
+  if (sold < it.minGrams) errors.push(`น้ำหนักที่ขายต้องไม่น้อยกว่า ${it.minGrams} กรัม`);
   if (sold + free > available) errors.push(`สต็อกไม่พอ: ต้องตัด ${fmtNum(sold + free)} ก. แต่คงเหลือ ${fmtNum(Math.max(0, available))} ก.`);
   if (disc > price) errors.push('ส่วนลดเฉพาะรายการเกินราคาสินค้า');
-  return { m, sold, free, disc, available, price, total: Math.max(0, price - disc), errors };
+  return { it, sold, free, disc, available, price, total: Math.max(0, round2(price - disc)), errors };
 }
 
-function renderCereal() {
-  const c = cerealCalc();
-  const modal = $('#m-cereal');
-  modal.querySelector('.modal-title').textContent = `${c.m.fullName}${cerealCtx.editId ? ' (แก้ไข)' : ''}`;
-
+function renderWeight() {
+  const c = weightCalc();
+  const modal = $('#m-weight');
+  modal.querySelector('.modal-title').textContent = `${c.it.name}${weightCtx.editId ? ' (แก้ไข)' : ''}`;
   const field = (key, label, hint, unit) => {
-    const raw = cerealCtx.f[key];
+    const raw = weightCtx.f[key];
     return `
-      <button class="num-field ${cerealCtx.active === key ? 'active' : ''}" data-field="${key}" type="button">
-        <div class="row nowrap"><div class="grow"><div class="nf-label">${label}</div><div class="nf-hint">${hint}</div></div></div>
+      <button class="num-field ${weightCtx.active === key ? 'active' : ''}" data-field="${key}" type="button">
+        <div class="nf-label">${label}</div><div class="nf-hint">${hint}</div>
         <div class="nf-val">${raw === '' ? '<span class="ph">0</span>' : fmtNum(toInt(raw))}<span class="unit">${unit}</span></div>
       </button>`;
   };
-  const chips = cerealCtx.active === 'disc' ? [5, 10, 20, 50] : [10, 50, 100, 200];
-
+  const chips = weightCtx.active === 'disc' ? [5, 10, 20, 50] : [10, 50, 100, 200];
   modal.querySelector('.modal-body').innerHTML = `
     <div class="info-strip">
-      <span>สต็อกคงเหลือ: <b>${fmtNum(Math.max(0, c.available))} กรัม</b></span>
-      <span>ราคา: <b>฿${c.m.pricePerGram} / กรัม</b></span>
-      <span>ขั้นต่ำ: <b>${CEREAL_MIN_G} กรัม</b></span>
+      <span>สต็อกคงเหลือ: <b>${isFinite(c.available) ? `${fmtNum(Math.max(0, c.available))} กรัม` : 'ไม่จำกัด'}</b></span>
+      <span>ราคา: <b>${money(c.it.pricePerGram)} / กรัม</b></span>
+      <span>ขั้นต่ำ: <b>${c.it.minGrams} กรัม</b></span>
     </div>
     <div class="cereal-layout">
       <div>
-        ${field('sold', 'น้ำหนักที่ขาย (กรัม)', `บังคับ · ขั้นต่ำ ${CEREAL_MIN_G} กรัม · ราคา = น้ำหนัก × ฿${c.m.pricePerGram}`, 'กรัม')}
+        ${field('sold', 'น้ำหนักที่ขาย (กรัม)', `บังคับ · ขั้นต่ำ ${c.it.minGrams} กรัม · ราคา = น้ำหนัก × ${money(c.it.pricePerGram)}`, 'กรัม')}
         ${field('free', 'น้ำหนักที่แถม (กรัม)', 'ไม่บังคับ · ของแถม ฿0 (ตัดสต็อกด้วย)', 'กรัม')}
         ${field('disc', 'ส่วนลดเฉพาะรายการนี้ (บาท)', 'ไม่บังคับ', 'บาท')}
         <div class="calc-box">
-          <div class="sum-row"><span>ราคา (${fmtNum(c.sold)} ก. × ฿${c.m.pricePerGram})</span><span>${money(c.price)}</span></div>
+          <div class="sum-row"><span>ราคา (${fmtNum(c.sold)} ก. × ${money(c.it.pricePerGram)})</span><span>${money(c.price)}</span></div>
           <div class="sum-row discount"><span>ส่วนลดรายการ</span><span>${negMoney(Math.min(c.disc, c.price))}</span></div>
           <div class="sum-row muted"><span>ตัดสต็อกรวม (ขาย + แถม)</span><span>${fmtNum(c.sold + c.free)} กรัม</span></div>
           <div class="sum-row total"><span>ยอดรายการนี้</span><span>${money(c.total)}</span></div>
         </div>
-        ${c.errors.length && cerealCtx.f.sold !== '' ? `<div class="err-box">${c.errors.map(esc).join('<br/>')}</div>` : ''}
+        ${c.errors.length && weightCtx.f.sold !== '' ? `<div class="err-box">${c.errors.map(esc).join('<br/>')}</div>` : ''}
       </div>
       <div>
         <div class="chip-row">${chips.map((n) => `<button class="chip" data-chip="${n}" type="button">+${n}</button>`).join('')}</div>
@@ -818,170 +1075,175 @@ function renderCereal() {
         </div>
       </div>
     </div>`;
-
   modal.querySelector('.modal-foot').innerHTML = `
     <button class="btn btn-ghost btn-lg" data-close type="button">ยกเลิก</button>
-    <button class="btn btn-primary btn-lg" data-act="cereal-ok" type="button" ${c.errors.length ? 'disabled' : ''}>
-      ${cerealCtx.editId ? 'บันทึกการแก้ไข' : 'เพิ่มลงตะกร้า'} · ${money(c.total)}
+    <button class="btn btn-primary btn-lg" data-act="weight-ok" type="button" ${c.errors.length ? 'disabled' : ''}>
+      ${weightCtx.editId ? 'บันทึกการแก้ไข' : 'เพิ่มลงตะกร้า'} · ${money(c.total)}
     </button>`;
 }
 
-function cerealKey(k) {
-  const f = cerealCtx.f;
-  const a = cerealCtx.active;
+function weightKey(k) {
+  const f = weightCtx.f;
+  const a = weightCtx.active;
   if (k === 'C') f[a] = '';
   else if (k === 'BS') f[a] = f[a].slice(0, -1);
   else if (f[a].length < 6) f[a] = f[a] === '0' ? String(k) : f[a] + k;
-  renderCereal();
+  renderWeight();
 }
 
-function cerealConfirm() {
-  const c = cerealCalc();
+function weightConfirm() {
+  const c = weightCalc();
   if (c.errors.length) return toast(c.errors[0], 'error');
   const data = { soldG: c.sold, freeG: c.free, disc: Math.min(c.disc, c.price) };
-  if (cerealCtx.editId) {
-    const line = state.cart.lines.find((l) => l.id === cerealCtx.editId);
+  if (weightCtx.editId) {
+    const line = state.cart.lines.find((l) => l.id === weightCtx.editId);
     if (line) Object.assign(line, data);
   } else {
-    state.cart.lines.push(Object.assign({ id: uid(), type: 'cereal', menuId: cerealCtx.menuId }, data));
+    state.cart.lines.push(Object.assign({ id: uid(), type: 'weight', menuId: weightCtx.menuId }, data));
   }
-  closeModal('m-cereal');
+  closeModal('m-weight');
   cartChanged();
-  toast(`เพิ่ม ${c.m.fullName} ${fmtNum(c.sold)} ก.${c.free ? ` (แถม ${c.free} ก.)` : ''}`, 'success', 1600);
+  toast(`เพิ่ม ${c.it.name} ${fmtNum(c.sold)} ก.${c.free ? ` (แถม ${c.free} ก.)` : ''}`, 'success', 1600);
 }
 
 /* ==========================================================================
-   10. GOOEY SET MODAL
+   12. SET MODAL (required pick-1 groups + add-on steppers)
    ========================================================================== */
 
-let gooeyCtx = null;
+let setCtx = null;
 
-function openGooey(editLine) {
-  gooeyCtx = editLine
-    ? { editId: editLine.id, main: editLine.main, addH: editLine.addH, addV: editLine.addV, addC: editLine.addC, qty: editLine.qty }
-    : { editId: null, main: null, addH: 0, addV: 0, addC: 0, qty: 1 };
-  if (!gooeyCtx.main) {
-    const r = cartNeeds();
-    const h = availableOf(ICE.hokkaido.key, r);
-    const v = availableOf(ICE.vanilla.key, r);
-    if (h > 0 && v <= 0) gooeyCtx.main = 'hokkaido';
-    if (v > 0 && h <= 0) gooeyCtx.main = 'vanilla';
+function openSet(menuId, editLine) {
+  const it = IDX.item[menuId];
+  setCtx = editLine
+    ? { menuId, editId: editLine.id, picks: clone(editLine.picks || {}), adds: clone(editLine.adds || {}), qty: editLine.qty }
+    : { menuId, editId: null, picks: {}, adds: {}, qty: 1 };
+  if (!editLine) {
+    // auto-select when only one option of a required group is in stock
+    for (const g of it.optionGroups) {
+      if (g.type !== 'pick1') continue;
+      const ok = g.options.filter((o) => setTry((c) => { c.picks[g.id] = o.id; }));
+      if (ok.length === 1) setCtx.picks[g.id] = ok[0].id;
+    }
   }
-  renderGooey();
-  openModal('m-gooey');
+  renderSet();
+  openModal('m-set');
 }
+const setLine = (c) => ({ type: 'set', menuId: c.menuId, picks: c.picks, adds: c.adds, qty: c.qty });
+function setTry(mutate) {
+  const c = clone(setCtx);
+  mutate(c);
+  return findShortages(lineNeeds(setLine(c)), setCtx.editId).length === 0;
+}
+function setComplete(c) {
+  const it = IDX.item[c.menuId];
+  return it.optionGroups.every((g) => g.type !== 'pick1' || !g.options.length || findOpt(g, c.picks[g.id]));
+}
+const addCount = (c, gid, oid) => ((c.adds[gid] || {})[oid]) || 0;
 
-function gooeyFits(cfg) {
-  if (!cfg.main) return false;
-  return findShortages(lineNeeds(Object.assign({ type: 'gooey', menuId: 'gooey_set' }, cfg)), gooeyCtx.editId).length === 0;
-}
-function gooeyTry(patch) {
-  return gooeyFits(Object.assign({}, gooeyCtx, patch, { main: (patch.main || gooeyCtx.main || 'hokkaido') }));
-}
+function renderSet() {
+  const c = setCtx;
+  const it = IDX.item[c.menuId];
+  const reserved = cartNeeds(c.editId);
+  const left = (p) => availableOf(p, reserved);
+  const fits = setTry(() => {});
+  const complete = setComplete(c);
+  const valid = fits && complete;
+  const unitPrice = setUnitPrice(it, setLine(c));
+  const total = round2(unitPrice * c.qty);
 
-function renderGooey() {
-  const g = gooeyCtx;
-  const reserved = cartNeeds(g.editId);
-  const left = {
-    c: availableOf('gooey_cookie', reserved),
-    h: availableOf(ICE.hokkaido.key, reserved),
-    v: availableOf(ICE.vanilla.key, reserved),
-  };
-  const setPrice = gooeySetPrice(g);
-  const total = setPrice * g.qty;
-  const valid = gooeyFits(g);
-  const canMain = (flavor) => gooeyFits(Object.assign({}, g, { main: flavor }));
-  const stepper = (field, value, canInc) => `
+  const pools = new Set();
+  it.baseConsumes.forEach((b) => pools.add(b.pool));
+  it.optionGroups.forEach((g) => g.options.forEach((o) => o.pool && pools.add(o.pool)));
+  const stepper = (attrs, value, min, canInc) => `
     <div class="stepper lg">
-      <button data-step="${field}" data-d="-1" type="button" ${value <= (field === 'qty' ? 1 : 0) ? 'disabled' : ''} aria-label="ลด">${svg('minus')}</button>
+      <button ${attrs} data-d="-1" type="button" ${value <= min ? 'disabled' : ''} aria-label="ลด">${svg('minus')}</button>
       <span class="qty">${value}</span>
-      <button data-step="${field}" data-d="1" type="button" ${canInc ? '' : 'disabled'} aria-label="เพิ่ม">${svg('plus')}</button>
+      <button ${attrs} data-d="1" type="button" ${canInc ? '' : 'disabled'} aria-label="เพิ่ม">${svg('plus')}</button>
     </div>`;
 
-  const modal = $('#m-gooey');
-  modal.querySelector('.modal-title').textContent = `Gooey Chocolate + Ice Cream${g.editId ? ' (แก้ไข)' : ''}`;
-  modal.querySelector('.modal-body').innerHTML = `
-    <div class="info-strip">
-      <span>คงเหลือ — คุกกี้ Gooey: <b>${Math.max(0, left.c)} ชิ้น</b></span>
-      <span>ฮอกไกโด: <b>${Math.max(0, left.h)} สกู๊ป</b></span>
-      <span>วนิลา: <b>${Math.max(0, left.v)} สกู๊ป</b></span>
-    </div>
-    <div class="gooey-layout">
-      <div>
+  const groupsHtml = it.optionGroups.map((g, gi) => {
+    if (g.type === 'pick1') {
+      return `
         <div class="section">
-          <div class="section-title">1. เลือกไอศกรีมหลักในเซ็ต <small>(1 สกู๊ป - บังคับเลือก)</small></div>
+          <div class="section-title">${gi + 1}. ${esc(g.name)} <small>(บังคับเลือก 1)</small></div>
           <div class="choice-row">
-            ${['hokkaido', 'vanilla'].map((f) => `
-              <button class="choice ${g.main === f ? 'selected' : ''}" data-main="${f}" type="button" ${canMain(f) || g.main === f ? '' : 'disabled'}>
-                ${ICE[f].name}<small>${ICE[f].en} · คงเหลือ ${Math.max(0, left[f === 'hokkaido' ? 'h' : 'v'])} สกู๊ป</small>
-              </button>`).join('')}
+            ${g.options.map((o) => {
+              const sel = c.picks[g.id] === o.id;
+              const can = sel || setTry((x) => { x.picks[g.id] = o.id; });
+              return `<button class="choice ${sel ? 'selected' : ''}" data-pick="${esc(g.id)}" data-o="${esc(o.id)}" type="button" ${can ? '' : 'disabled'}>
+                ${esc(o.name)}<small>${o.price ? `+${money(o.price)} · ` : ''}${o.pool ? `คงเหลือ ${fmtNum(Math.max(0, left(o.pool)))} ${poolUnit(o.pool)}` : 'พร้อมขาย'}</small>
+              </button>`;
+            }).join('')}
           </div>
+        </div>`;
+    }
+    return `
+      <div class="section">
+        <div class="section-title">${gi + 1}. ${esc(g.name)} <small>(ไม่บังคับ)</small></div>
+        <div class="card-box">
+          ${g.options.map((o) => {
+            const n = addCount(c, g.id, o.id);
+            const canInc = setTry((x) => { x.adds[g.id] = x.adds[g.id] || {}; x.adds[g.id][o.id] = n + 1; });
+            return `<div class="addon-row"><div class="addon-name">${esc(o.name)} (+${money(o.price)})<small>${o.pool ? `คงเหลือ ${fmtNum(Math.max(0, left(o.pool)))} ${poolUnit(o.pool)}` : ''}</small></div>
+              ${stepper(`data-add="${esc(g.id)}" data-o="${esc(o.id)}"`, n, 0, canInc)}</div>`;
+          }).join('')}
         </div>
-        <div class="section">
-          <div class="section-title">2. Add-on เพิ่มไอศกรีม <small>(+฿${GOOEY.extraScoop} / สกู๊ป - คละรสได้)</small></div>
-          <div class="card-box">
-            <div class="addon-row"><div class="addon-name">ฮอกไกโด (+฿${GOOEY.extraScoop})<small>Hokkaido</small></div>${stepper('addH', g.addH, gooeyTry({ addH: g.addH + 1 }))}</div>
-            <div class="addon-row"><div class="addon-name">วนิลา (+฿${GOOEY.extraScoop})<small>Vanilla</small></div>${stepper('addV', g.addV, gooeyTry({ addV: g.addV + 1 }))}</div>
-          </div>
-        </div>
-        <div class="section">
-          <div class="section-title">3. Add-on เพิ่มคุกกี้ Gooey Chocolate <small>(+฿${GOOEY.extraCookie} / ชิ้น)</small></div>
-          <div class="card-box">
-            <div class="addon-row"><div class="addon-name">คุกกี้ Gooey (+฿${GOOEY.extraCookie})<small>ไม่ร่วมโปรซอฟต์คุกกี้ 3 ชิ้น 100</small></div>${stepper('addC', g.addC, gooeyTry({ addC: g.addC + 1 }))}</div>
-          </div>
-        </div>
-      </div>
+      </div>`;
+  }).join('');
+
+  const sel = setSelections(it, setLine(c));
+  const modal = $('#m-set');
+  modal.querySelector('.modal-title').textContent = `${it.name}${c.editId ? ' (แก้ไข)' : ''}`;
+  modal.querySelector('.modal-body').innerHTML = `
+    ${pools.size ? `<div class="info-strip">${[...pools].map((p) => `<span>${esc(poolName(p))}: <b>${fmtNum(Math.max(0, left(p)))} ${poolUnit(p)}</b></span>`).join('')}</div>` : ''}
+    <div class="gooey-layout">
+      <div>${groupsHtml || '<p class="help">เซ็ตนี้ไม่มีตัวเลือก</p>'}</div>
       <div>
         <div class="section">
           <div class="section-title">จำนวนเซ็ต</div>
-          <div class="card-box" style="display:flex;justify-content:center">${stepper('qty', g.qty, gooeyTry({ qty: g.qty + 1 }))}</div>
+          <div class="card-box" style="display:flex;justify-content:center">${stepper('data-qty="1"', c.qty, 1, setTry((x) => { x.qty += 1; }))}</div>
         </div>
         <div class="calc-box">
-          <div class="sum-row"><span>ราคาเซ็ต</span><span>${money(GOOEY.basePrice)}</span></div>
-          ${g.addH + g.addV ? `<div class="sum-row"><span>เพิ่มไอศกรีม ${g.addH + g.addV} สกู๊ป</span><span>+${money(GOOEY.extraScoop * (g.addH + g.addV))}</span></div>` : ''}
-          ${g.addC ? `<div class="sum-row"><span>เพิ่มคุกกี้ ${g.addC} ชิ้น</span><span>+${money(GOOEY.extraCookie * g.addC)}</span></div>` : ''}
-          <div class="sum-row muted"><span>ราคาต่อเซ็ต × ${g.qty}</span><span>${money(setPrice)}</span></div>
+          <div class="sum-row"><span>ราคาเซ็ต</span><span>${money(it.price)}</span></div>
+          ${it.optionGroups.filter((g) => g.type === 'pick1').map((g) => { const o = findOpt(g, c.picks[g.id]); return o && o.price ? `<div class="sum-row"><span>${esc(o.name)}</span><span>+${money(o.price)}</span></div>` : ''; }).join('')}
+          ${sel.addOns.map((a) => `<div class="sum-row"><span>${esc(a.name)} × ${a.n}</span><span>+${money(a.price * a.n)}</span></div>`).join('')}
+          <div class="sum-row muted"><span>ราคาต่อเซ็ต × ${c.qty}</span><span>${money(unitPrice)}</span></div>
           <div class="sum-row total"><span>รวม</span><span>${money(total)}</span></div>
         </div>
-        ${!g.main ? '<div class="warn-box">กรุณาเลือกไอศกรีมหลักในเซ็ต</div>' : (!valid ? '<div class="err-box">สต็อกไม่พอสำหรับตัวเลือกนี้</div>' : '')}
+        ${!complete ? '<div class="warn-box">กรุณาเลือกตัวเลือกที่บังคับให้ครบ</div>' : (!fits ? '<div class="err-box">สต็อกไม่พอสำหรับตัวเลือกนี้</div>' : '')}
       </div>
     </div>`;
-
   modal.querySelector('.modal-foot').innerHTML = `
     <button class="btn btn-ghost btn-lg" data-close type="button">ยกเลิก</button>
-    <button class="btn btn-primary btn-lg" data-act="gooey-ok" type="button" ${valid ? '' : 'disabled'}>
-      ${g.editId ? 'บันทึกการแก้ไข' : 'เพิ่มลงตะกร้า'} · ${money(total)}
+    <button class="btn btn-primary btn-lg" data-act="set-ok" type="button" ${valid ? '' : 'disabled'}>
+      ${c.editId ? 'บันทึกการแก้ไข' : 'เพิ่มลงตะกร้า'} · ${money(total)}
     </button>`;
 }
 
-function gooeyStep(field, d) {
-  const g = gooeyCtx;
-  const next = g[field] + d;
-  if (next < (field === 'qty' ? 1 : 0)) return;
-  if (d > 0 && !gooeyTry({ [field]: next })) return toast('สต็อกไม่พอ', 'error');
-  g[field] = next;
-  renderGooey();
-}
-
-function gooeyConfirm() {
-  const g = gooeyCtx;
-  if (!gooeyFits(g)) return toast('กรุณาเลือกไอศกรีมหลัก หรือสต็อกไม่พอ', 'error');
-  const cfg = { main: g.main, addH: g.addH, addV: g.addV, addC: g.addC, qty: g.qty };
-  if (g.editId) {
-    const line = state.cart.lines.find((l) => l.id === g.editId);
+function setConfirm() {
+  const c = setCtx;
+  if (!setComplete(c) || !setTry(() => {})) return toast('กรุณาเลือกตัวเลือกให้ครบ หรือสต็อกไม่พอ', 'error');
+  for (const gid of Object.keys(c.adds)) {
+    for (const oid of Object.keys(c.adds[gid])) if (!c.adds[gid][oid]) delete c.adds[gid][oid];
+    if (!Object.keys(c.adds[gid]).length) delete c.adds[gid];
+  }
+  const cfg = { picks: c.picks, adds: c.adds, qty: c.qty };
+  if (c.editId) {
+    const line = state.cart.lines.find((l) => l.id === c.editId);
     if (line) Object.assign(line, cfg);
   } else {
-    const same = state.cart.lines.find((l) => l.type === 'gooey' && l.main === cfg.main && l.addH === cfg.addH && l.addV === cfg.addV && l.addC === cfg.addC);
-    if (same) same.qty += cfg.qty;
-    else state.cart.lines.push(Object.assign({ id: uid(), type: 'gooey', menuId: 'gooey_set' }, cfg));
+    const key = JSON.stringify([c.picks, c.adds]);
+    const same = state.cart.lines.find((l) => l.type === 'set' && l.menuId === c.menuId && JSON.stringify([l.picks, l.adds]) === key);
+    if (same) same.qty += c.qty;
+    else state.cart.lines.push(Object.assign({ id: uid(), type: 'set', menuId: c.menuId }, cfg));
   }
-  closeModal('m-gooey');
+  closeModal('m-set');
   cartChanged();
-  toast('เพิ่ม Gooey Chocolate + Ice Cream แล้ว', 'success', 1600);
+  toast(`เพิ่ม ${IDX.item[c.menuId].name} แล้ว`, 'success', 1600);
 }
 
 /* ==========================================================================
-   11. PAYMENT & CHECKOUT
+   13. PAYMENT & CHECKOUT
    ========================================================================== */
 
 let payCtx = null;
@@ -1040,7 +1302,6 @@ function renderPayment() {
           </div>` : ''}
       </div>
     </div>`;
-
   modal.querySelector('.modal-foot').innerHTML = `
     <button class="btn btn-ghost btn-lg" data-close type="button">กลับไปแก้ไข</button>
     <button class="btn btn-primary btn-lg" id="btnPayConfirm" data-act="pay-ok" type="button">ยืนยันการชำระเงิน · ${money(t.net)}</button>`;
@@ -1067,13 +1328,42 @@ function updatePayState() {
   if (btn) btn.disabled = !ok;
 }
 
+/** ORD-<DEVICE>-YYYYMMDD-001 — the device prefix prevents collisions between iPads */
 function nextOrderId(d) {
-  const prefix = `ORD-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-`;
+  const prefix = `ORD-${state.settings.devicePrefix || 'IPAD1'}-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-`;
   let max = 0;
   for (const o of state.orders) {
     if (o.id.startsWith(prefix)) max = Math.max(max, parseInt(o.id.slice(prefix.length), 10) || 0);
   }
   return prefix + pad(max + 1, 3);
+}
+
+function buildOrderItems(lines) {
+  return lines.map((l, i) => {
+    const it = IDX.item[l.menuId];
+    const cat = IDX.cat[it.categoryId];
+    const gross = lineGross(l);
+    const itemDiscount = lineItemDiscount(l);
+    const sel = l.type === 'set' ? setSelections(it, l) : { options: [], addOns: [] };
+    return {
+      lineNo: i + 1,
+      type: l.type,
+      menuId: l.menuId,
+      category: cat ? cat.name : '',
+      name: lineTitle(l),
+      detail: lineDetail(l),
+      qty: l.type === 'weight' ? 1 : l.qty,
+      unitPrice: l.type === 'unit' ? it.price : l.type === 'set' ? setUnitPrice(it, l) : it.pricePerGram,
+      soldG: l.soldG || 0,
+      freeG: l.freeG || 0,
+      options: sel.options,
+      addOns: sel.addOns.map((a) => ({ name: a.name, n: a.n })),
+      gross,
+      itemDiscount,
+      net: round2(gross - itemDiscount),
+      needs: lineNeeds(l),
+    };
+  });
 }
 
 function confirmPayment() {
@@ -1097,32 +1387,8 @@ function confirmPayment() {
     createdAtUTC: now.toISOString(),
     createdAtTH: fmtDateTime(now),
     date: dateKey(now),
-    device: state.settings.deviceName || '',
-    items: state.cart.lines.map((l, i) => {
-      const m = MENU_BY_ID[l.menuId];
-      const gross = lineGross(l);
-      const itemDiscount = lineItemDiscount(l);
-      return {
-        lineNo: i + 1,
-        type: l.type,
-        menuId: l.menuId,
-        category: CATEGORY_NAME[m.cat],
-        name: lineTitle(l),
-        detail: lineDetail(l),
-        qty: l.type === 'cereal' ? 1 : l.qty,
-        unitPrice: l.type === 'unit' ? m.price : l.type === 'gooey' ? gooeySetPrice(l) : m.pricePerGram,
-        soldG: l.soldG || 0,
-        freeG: l.freeG || 0,
-        main: l.main || '',
-        addH: l.addH || 0,
-        addV: l.addV || 0,
-        addC: l.addC || 0,
-        gross,
-        itemDiscount,
-        net: round2(gross - itemDiscount),
-        needs: lineNeeds(l),
-      };
-    }),
+    device: state.settings.devicePrefix,
+    items: buildOrderItems(state.cart.lines),
     subtotal: t.subtotal,
     promos: t.promos,
     promoDiscount: t.promoDiscount,
@@ -1140,7 +1406,6 @@ function confirmPayment() {
     voidSynced: false,
   };
 
-  // 1) persist the order first — abort cleanly if storage is full
   state.orders.push(order);
   if (!save.orders()) {
     state.orders.pop();
@@ -1148,12 +1413,9 @@ function confirmPayment() {
     updatePayState();
     return;
   }
-  // 2) deduct stock
   for (const k in order.stockDeduction) state.stock[k] = Math.max(0, (state.stock[k] || 0) - order.stockDeduction[k]);
   save.stock();
-  // 3) queue for Google Sheets
   enqueue('NEW_ORDER', order.id);
-  // 4) clear cart
   state.cart.lines = [];
   state.cart.manualDiscount = '';
   $('#manualDiscount').value = '';
@@ -1166,18 +1428,82 @@ function confirmPayment() {
 }
 
 /* ==========================================================================
-   12. HISTORY, SALES SUMMARY & VOID
+   14. HISTORY, SALES SUMMARY & VOID
    ========================================================================== */
 
 let histDate = todayKey();
+let histScope = 'local'; // 'local' | 'all'
+let histLoading = false;
 
 function openHistory() {
   histDate = todayKey();
   renderHistory();
   openModal('m-history');
+  if (histScope === 'all') loadRemoteOrders();
+}
+
+/** Sheet row → order-like object for display (read-only) */
+function normalizeRemoteOrder(r) {
+  const label = r.Payment_Method || '';
+  return {
+    id: String(r.Order_ID || ''),
+    remote: true,
+    status: r.Status === 'VOIDED' ? 'VOIDED' : 'COMPLETED',
+    date: String(r.Date || ''),
+    createdAtTH: String(r.Date_Time || ''),
+    createdAtISO: String(r.Timestamp_ISO || ''),
+    itemsDetail: String(r.Items_Detail || ''),
+    items: null,
+    subtotal: num(r.Subtotal),
+    promoDiscount: num(r.Promo_Discount),
+    itemDiscount: num(r.Item_Discount),
+    manualDiscount: num(r.Manual_Discount),
+    totalDiscount: num(r.Total_Discount),
+    net: num(r.Net_Total),
+    payment: {
+      method: r.Payment_Key || PAY_LABEL_TO_KEY[label] || 'cash',
+      label,
+      cashReceived: r.Cash_Received === '' || r.Cash_Received == null ? null : num(r.Cash_Received),
+      change: r.Change === '' || r.Change == null ? null : num(r.Change),
+    },
+    device: String(r.Device || ''),
+    voidedAtTH: String(r.Voided_At || ''),
+    voidReason: String(r.Void_Reason || ''),
+    synced: true,
+    voidSynced: true,
+  };
+}
+
+async function loadRemoteOrders() {
+  const url = (state.settings.gasUrl || '').trim();
+  if (!url || !navigator.onLine) return;
+  const date = histDate;
+  histLoading = true;
+  renderHistory();
+  try {
+    const res = await postToSheet(url, { source: 'ipad-pos', device: state.settings.devicePrefix, actions: [{ qid: 'pull-orders', action: 'PULL_ORDERS', data: { date } }] }, { needResponse: true });
+    const r = res.results && res.results[0];
+    if (!r || !r.ok) throw new Error((r && r.error) || 'PULL_ORDERS failed');
+    state.remoteOrders = { [date]: (r.result.orders || []).map(normalizeRemoteOrder) };
+    save.remote();
+  } catch (e) {
+    toast(`ดึงบิลจาก Cloud ไม่สำเร็จ: ${e.message}`, 'error', 4000);
+  } finally {
+    histLoading = false;
+    if (isOpen('m-history')) renderHistory();
+  }
+}
+
+function ordersForHistory() {
+  const local = state.orders.filter((o) => o.date === histDate);
+  if (histScope !== 'all') return local;
+  const ids = new Set(local.map((o) => o.id));
+  const remote = (state.remoteOrders[histDate] || []).filter((o) => !ids.has(o.id));
+  return local.concat(remote);
 }
 
 function orderSyncPill(o) {
+  if (o.remote) return `<span class="pill pill-mute">${esc(o.device || 'Cloud')}</span>`;
   if (o.status === 'VOIDED') {
     return o.voidSynced ? '<span class="pill pill-ok">VOID ✓ Synced</span>' : '<span class="pill pill-wait">VOID รอ Sync</span>';
   }
@@ -1186,28 +1512,34 @@ function orderSyncPill(o) {
 
 function renderHistory() {
   const modal = $('#m-history');
-  const orders = state.orders.filter((o) => o.date === histDate).sort((a, b) => (a.createdAtUTC < b.createdAtUTC ? 1 : -1));
+  const orders = ordersForHistory().sort((a, b) => ((a.createdAtISO || '') < (b.createdAtISO || '') ? 1 : -1));
   const done = orders.filter((o) => o.status !== 'VOIDED');
   const voided = orders.length - done.length;
   const sum = (arr, f) => round2(arr.reduce((s, o) => s + f(o), 0));
   const byMethod = (m) => sum(done.filter((o) => o.payment.method === m), (o) => o.net);
   const countMethod = (m) => done.filter((o) => o.payment.method === m).length;
 
-  // items sold summary (from stock deducted on completed bills)
   const sold = {};
   let freeG = 0;
   for (const o of done) {
+    if (o.remote) continue;
     mergeNeeds(sold, o.stockDeduction || {});
     for (const i of o.items) freeG += i.freeG || 0;
   }
-  const soldRows = Object.keys(STOCK_ITEMS).filter((k) => sold[k]).map((k) =>
-    `<div><span>${esc(STOCK_ITEMS[k].name)}</span><b>${fmtNum(sold[k])} ${UNIT_LABEL[STOCK_ITEMS[k].unit]}</b></div>`).join('');
+  const soldRows = Object.keys(sold).map((k) =>
+    `<div><span>${esc(poolName(k))}</span><b>${fmtNum(sold[k])} ${poolUnit(k)}</b></div>`).join('');
+  const hasUrl = !!(state.settings.gasUrl || '').trim();
 
-  const rows = orders.map((o) => `
+  const rows = orders.map((o) => {
+    const itemsHtml = o.items
+      ? o.items.map((i) => `<div><b>${esc(i.name)}</b> — ${esc(i.detail)}</div>`).join('')
+      : o.itemsDetail.split(' | ').map((s) => `<div>${esc(s)}</div>`).join('');
+    const [d, t] = (o.createdAtTH || ' ').split(' ');
+    return `
     <tr class="${o.status === 'VOIDED' ? 'voided' : ''}">
       <td class="oid">${esc(o.id)}</td>
-      <td class="nowrap">${esc(o.createdAtTH.split(' ')[0])}<div class="help" style="margin:0">${esc(o.createdAtTH.split(' ')[1] || '')}</div></td>
-      <td class="items-cell">${o.items.map((i) => `<div><b>${esc(i.name)}</b> — ${esc(i.detail)}</div>`).join('')}</td>
+      <td class="nowrap">${esc(d)}<div class="help" style="margin:0">${esc(t || '')}</div></td>
+      <td class="items-cell">${itemsHtml}</td>
       <td class="num strike">${money(o.subtotal)}</td>
       <td class="num strike">${negMoney(o.promoDiscount + o.itemDiscount)}${o.itemDiscount ? `<div class="help">รวมลดรายการ ${money(o.itemDiscount)}</div>` : ''}</td>
       <td class="num strike">${negMoney(o.manualDiscount)}</td>
@@ -1216,21 +1548,26 @@ function renderHistory() {
       <td>${orderSyncPill(o)}</td>
       <td>${o.status === 'VOIDED'
         ? `<span class="pill pill-void">ยกเลิกบิล</span><div class="help">${esc(o.voidedAtTH)}${o.voidReason ? `<br/>${esc(o.voidReason)}` : ''}</div>`
-        : `<span class="pill pill-ok">ปกติ</span><div style="margin-top:8px"><button class="btn btn-danger btn-sm" data-void="${esc(o.id)}" type="button">ยกเลิกบิล</button></div>`}</td>
-    </tr>`).join('');
+        : `<span class="pill pill-ok">ปกติ</span>${o.remote ? `<div class="help">ยกเลิกได้ที่เครื่อง ${esc(o.device)}</div>` : `<div style="margin-top:8px"><button class="btn btn-danger btn-sm" data-void="${esc(o.id)}" type="button">ยกเลิกบิล</button></div>`}`}</td>
+    </tr>`;
+  }).join('');
 
-  modal.querySelector('.modal-body').innerHTML = `
+  paint(modal.querySelector('.modal-body'), `
     <div class="hist-toolbar">
       <button class="icon-btn" data-day="-1" type="button" aria-label="วันก่อนหน้า">${svg('left')}</button>
       <input class="input" id="histDate" type="date" value="${histDate}" max="${todayKey()}" />
       <button class="icon-btn" data-day="1" type="button" aria-label="วันถัดไป" ${histDate >= todayKey() ? 'disabled' : ''}>${svg('right')}</button>
       <button class="btn btn-outline" data-day="today" type="button">วันนี้</button>
+      <div class="seg">
+        <button class="${histScope === 'local' ? 'on' : ''}" data-scope="local" type="button">เครื่องนี้</button>
+        <button class="${histScope === 'all' ? 'on' : ''}" data-scope="all" type="button" ${hasUrl ? '' : 'disabled'}>ทุกเครื่อง (Cloud)</button>
+      </div>
       <span class="grow"></span>
-      <span class="help">แสดงข้อมูลวันที่ <b>${fmtDateKeyTH(histDate)}</b> · ยอดขายไม่รวมบิลที่ยกเลิก</span>
+      <span class="help">${histLoading ? 'กำลังดึงบิลจาก Cloud…' : `วันที่ <b>${fmtDateKeyTH(histDate)}</b> · ไม่รวมบิลที่ยกเลิก`}</span>
     </div>
 
     <div class="stat-grid">
-      <div class="stat primary span2"><div class="k">ยอดขายสุทธิรวม</div><div class="v">${money(sum(done, (o) => o.net))}</div><div class="s">${done.length} บิลสำเร็จ${voided ? ` · ยกเลิก ${voided} บิล` : ''}</div></div>
+      <div class="stat primary span2"><div class="k">ยอดขายสุทธิรวม${histScope === 'all' ? ' (ทุกเครื่อง)' : ''}</div><div class="v">${money(sum(done, (o) => o.net))}</div><div class="s">${done.length} บิลสำเร็จ${voided ? ` · ยกเลิก ${voided} บิล` : ''}</div></div>
       <div class="stat"><div class="k">เงินสด</div><div class="v">${money(byMethod('cash'))}</div><div class="s">${countMethod('cash')} บิล</div></div>
       <div class="stat"><div class="k">สแกน QR</div><div class="v">${money(byMethod('qr'))}</div><div class="s">${countMethod('qr')} บิล</div></div>
       <div class="stat"><div class="k">ไทยช่วยไทยพลัส</div><div class="v">${money(byMethod('tcp'))}</div><div class="s">${countMethod('tcp')} บิล</div></div>
@@ -1240,7 +1577,7 @@ function renderHistory() {
 
     ${soldRows ? `
       <details class="sold-summary">
-        <summary>สรุปจำนวนสินค้าที่ตัดสต็อก (บิลสำเร็จ)${freeG ? ` · ซีเรียลแถมรวม ${fmtNum(freeG)} ก.` : ''}</summary>
+        <summary>สรุปจำนวนสินค้าที่ตัดสต็อก (บิลสำเร็จของเครื่องนี้)${freeG ? ` · แถมรวม ${fmtNum(freeG)} ก.` : ''}</summary>
         <div class="sold-grid">${soldRows}</div>
       </details>` : ''}
 
@@ -1253,13 +1590,13 @@ function renderHistory() {
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
-      </div>` : `<div class="empty-state">${svg('receipt', 48)}<p>ไม่มีบิลในวันที่เลือก</p></div>`}`;
+      </div>` : `<div class="empty-state">${svg('receipt', 48)}<p>ไม่มีบิลในวันที่เลือก</p></div>`}`);
 }
 
 async function voidOrder(orderId) {
   const o = state.orders.find((x) => x.id === orderId);
   if (!o || o.status === 'VOIDED') return;
-  const restore = Object.keys(o.stockDeduction || {}).map((k) => `${STOCK_ITEMS[k] ? STOCK_ITEMS[k].name : k} +${fmtNum(o.stockDeduction[k])} ${STOCK_ITEMS[k] ? UNIT_LABEL[STOCK_ITEMS[k].unit] : ''}`);
+  const restore = Object.keys(o.stockDeduction || {}).map((k) => `${poolName(k)} +${fmtNum(o.stockDeduction[k])} ${poolUnit(k)}`);
   const r = await confirmDialog({
     title: `ยกเลิกบิล ${o.id}`,
     html: `<p>ยอด <b>${money(o.net)}</b> (${esc(o.payment.label)}) จะถูกยกเลิกและไม่นับรวมในยอดขาย</p>
@@ -1269,7 +1606,6 @@ async function voidOrder(orderId) {
     input: { placeholder: 'เหตุผล (ไม่บังคับ)' },
   });
   if (!r.ok) return;
-
   const now = new Date();
   o.status = 'VOIDED';
   o.voidedAtISO = isoLocal(now);
@@ -1287,52 +1623,293 @@ async function voidOrder(orderId) {
 }
 
 /* ==========================================================================
-   13. STOCK & IMAGE MANAGEMENT
+   15. MANAGER — MENU / CATEGORIES / PROMOTIONS / STOCK  (GrabMerchant-style)
    ========================================================================== */
 
+const mgr = { tab: 'menu', catFilter: 'all' };
 let imageTarget = null;
 
-function openStock() {
-  renderStock();
-  openModal('m-stock');
+/** Persist catalog edits, refresh indexes, keep the cart valid and schedule a cloud push. */
+function commitCatalog() {
+  state.catalog.updatedAt = isoLocal(new Date());
+  for (const p of state.catalog.pools) if (!(p.id in state.stock)) state.stock[p.id] = 0;
+  save.catalog();
+  save.stock();
+  reindex();
+  sanitizeCart();
+  save.cart();
+  markDirty('catalog');
+  renderAll();
 }
 
-function renderStock() {
-  const modal = $('#m-stock');
-  modal.querySelector('.modal-body').innerHTML = STOCK_GROUPS.map((g) => `
-    <div class="stock-group">
-      <h3>${esc(g.title)} <small>${esc(g.note)}</small></h3>
-      ${g.keys.map((k) => stockRowHTML(k)).join('')}
-    </div>`).join('') + `<p class="help">รูปภาพถูกย่อเป็น 300×300 JPEG และเก็บไว้ในเครื่อง (IndexedDB) ใช้งานออฟไลน์ได้</p>`;
+function openManager(tab) {
+  if (tab) mgr.tab = tab;
+  renderManager();
+  openModal('m-manage');
 }
 
-function stockRowHTML(k) {
-  const it = STOCK_ITEMS[k];
-  const unit = UNIT_LABEL[it.unit];
-  const img = it.image ? state.images[it.image] : null;
-  const quick = it.unit === 'g' ? [[-100, '-100g'], [100, '+100g'], [500, '+500g']] : [[-1, '-1'], [5, '+5'], [10, '+10']];
-  const imgBlock = it.image
-    ? `<div class="stock-thumb">${img ? `<img src="${img}" alt="" />` : svg('image', 30)}</div>`
-    : `<div class="stock-thumb none">${svg('cookie', 28)}</div>`;
-  const imgActions = it.image ? `
-    <div class="stock-img-actions">
-      <button class="btn btn-ghost btn-sm" data-img="${it.image}" type="button">${svg('image', 18)} ${img ? 'เปลี่ยนรูป' : 'อัปโหลดรูป'}</button>
-      ${img ? `<button class="btn btn-ghost btn-sm" data-img-del="${it.image}" type="button" style="color:var(--danger)">ลบรูป</button>` : ''}
-    </div>` : '<div class="stock-meta">ใช้ร่วมในเมนู Gooey Chocolate + Ice Cream</div>';
+function renderManager() {
+  const tabs = [
+    ['menu', 'เมนู', 'menu', state.catalog.items.length],
+    ['cats', 'หมวดหมู่', 'folder', state.catalog.categories.length],
+    ['promos', 'โปรโมชั่น', 'tag', state.catalog.promos.length],
+    ['stock', 'สต็อก', 'box', state.catalog.pools.length],
+  ];
+  const body = $('#m-manage .modal-body');
+  const content = mgr.tab === 'cats' ? mgrCatsHTML() : mgr.tab === 'promos' ? mgrPromosHTML() : mgr.tab === 'stock' ? mgrStockHTML() : mgrMenuHTML();
+  paint(body, `
+    <div class="mgr-tabs">
+      ${tabs.map(([id, label, ic, n]) => `<button class="mgr-tab ${mgr.tab === id ? 'on' : ''}" data-mtab="${id}" type="button">${svg(ic, 18)} ${label}<span class="cnt">${n}</span></button>`).join('')}
+    </div>
+    <div class="mgr-content">${content}</div>`);
+  $('#m-manage .foot-note').textContent = (state.settings.gasUrl || '').trim() && state.settings.autoPush
+    ? (hasStateChanges() ? 'มีการเปลี่ยนแปลงรอส่งขึ้น Cloud…' : 'ข้อมูลตรงกับ Cloud ✓')
+    : 'บันทึกในเครื่องอัตโนมัติ';
+}
+
+/* ---------- Menu tab ---------- */
+function itemMetaText(it) {
+  const parts = [MODES[it.mode].label];
+  if (it.mode === 'unit') parts.push(money(it.price));
+  if (it.mode === 'weight') parts.push(`${money(it.pricePerGram)}/กรัม · ขั้นต่ำ ${it.minGrams} ก.`);
+  if (it.mode === 'set') parts.push(`${money(it.price)} · ${it.optionGroups.length} กลุ่มตัวเลือก`);
+  const p = effectivePromo(it);
+  if (p) parts.push(p.name);
+  return parts.join(' · ');
+}
+function itemStockText(it) {
+  if (it.mode === 'set') {
+    const sets = setCapacity(it, (p) => (p ? state.stock[p] || 0 : Infinity));
+    return isFinite(sets) ? `${sets} เซ็ต` : 'ไม่ตัดสต็อก';
+  }
+  if (!it.stockPool) return 'ไม่ตัดสต็อก';
+  return `${fmtNum(state.stock[it.stockPool] || 0)} ${poolUnit(it.stockPool)}${it.stockPool !== it.id ? ' (ใช้ร่วม)' : ''}`;
+}
+
+function mgrMenuHTML() {
+  const cats = state.catalog.categories;
+  const shown = mgr.catFilter === 'all' ? cats : cats.filter((c) => c.id === mgr.catFilter);
   return `
-    <div class="stock-row" data-row="${k}">
-      ${imgBlock}
-      <div>
-        <div class="stock-name">${esc(it.name)}</div>
-        <div class="stock-meta">รหัส: ${k} · หน่วย: ${unit}${it.unit === 'g' ? ` · SOLD OUT เมื่อ &lt; ${CEREAL_MIN_G} ก.` : ''}</div>
-        ${imgActions}
+    <div class="mgr-toolbar">
+      <div class="chips">
+        <button class="fchip ${mgr.catFilter === 'all' ? 'on' : ''}" data-mcat="all" type="button">ทั้งหมด</button>
+        ${cats.map((c) => `<button class="fchip ${mgr.catFilter === c.id ? 'on' : ''}" data-mcat="${esc(c.id)}" type="button">${esc(c.name)}</button>`).join('')}
       </div>
-      <div class="stock-input-wrap">
-        <input class="stock-input ${state.stock[k] <= 0 ? 'zero' : ''}" data-stock="${k}" type="number" inputmode="numeric" min="0" step="1" value="${state.stock[k]}" />
-        <span class="stock-unit">${unit}</span>
-      </div>
-      <div class="quick-add">
-        ${quick.map(([n, label]) => `<button class="${n < 0 ? 'minus' : ''}" data-quick="${k}" data-n="${n}" type="button">${label}</button>`).join('')}
+      <button class="btn btn-primary" data-act="item-new" type="button">${svg('plus', 18)} เพิ่มเมนูใหม่</button>
+    </div>
+    ${shown.map((c) => {
+      const items = state.catalog.items.filter((it) => it.categoryId === c.id);
+      return `
+        <div class="mgr-cat">
+          <div class="mgr-cat-title">${esc(c.name)} <small>${items.length} รายการ${c.hidden ? ' · หมวดนี้ซ่อนอยู่' : ''}</small></div>
+          ${items.length ? items.map((it) => {
+            const av = itemAvailability(it);
+            const raw = it.availability === 'soldout' && it.soldOutDate !== todayKey() ? 'normal' : it.availability;
+            return `
+            <div class="mgr-item ${av !== 'normal' ? 'is-off' : ''}">
+              <button class="mgr-thumb" data-act="item-edit" data-id="${esc(it.id)}" type="button">${state.images[it.id] ? `<img src="${state.images[it.id]}" alt="" />` : svg('image', 26)}</button>
+              <div class="mgr-info">
+                <div class="mgr-name">${esc(it.name)}</div>
+                <div class="mgr-meta">${esc(itemMetaText(it))}</div>
+                <div class="mgr-meta">สต็อก: <b>${esc(itemStockText(it))}</b></div>
+              </div>
+              <div class="seg seg-avail">
+                ${Object.keys(AVAIL).map((k) => `<button class="${raw === k ? `on ${k}` : ''}" data-act="avail" data-id="${esc(it.id)}" data-v="${k}" type="button">${k === 'normal' ? 'เปิดขาย' : k === 'soldout' ? 'หมดวันนี้' : 'ซ่อน'}</button>`).join('')}
+              </div>
+              <button class="btn btn-outline btn-sm" data-act="item-edit" data-id="${esc(it.id)}" type="button">${svg('edit', 16)} แก้ไข</button>
+            </div>`;
+          }).join('') : '<div class="help" style="padding:8px 4px">ยังไม่มีเมนูในหมวดนี้</div>'}
+        </div>`;
+    }).join('')}`;
+}
+
+function setAvailability(id, v) {
+  const it = IDX.item[id];
+  if (!it) return;
+  it.availability = v;
+  it.soldOutDate = v === 'soldout' ? todayKey() : '';
+  commitCatalog();
+  renderManager();
+  toast(`${it.name}: ${AVAIL[v]}`, '', 1600);
+}
+
+/* ---------- Categories tab ---------- */
+function promoOptions(selected) {
+  return `<option value="" ${!selected ? 'selected' : ''}>— ไม่มีโปรของหมวด —</option>
+    ${state.catalog.promos.map((p) => `<option value="${esc(p.id)}" ${selected === p.id ? 'selected' : ''}>${esc(p.name)}${p.active ? '' : ' (ปิดอยู่)'}</option>`).join('')}`;
+}
+function mgrCatsHTML() {
+  const cats = state.catalog.categories;
+  return `
+    <p class="help" style="margin:0 0 12px">ลำดับหมวดหมู่ = ลำดับแท็บบนหน้าขาย · โปรของหมวดใช้กับทุกเมนู “ขายเป็นชิ้น” ในหมวด (เว้นแต่เมนูนั้นตั้งโปรเอง)</p>
+    ${cats.map((c, i) => {
+      const n = state.catalog.items.filter((it) => it.categoryId === c.id).length;
+      return `
+      <div class="mgr-row ${c.hidden ? 'is-off' : ''}">
+        <div class="mgr-order">
+          <button class="icon-btn sm" data-act="cat-up" data-id="${esc(c.id)}" type="button" ${i === 0 ? 'disabled' : ''} aria-label="เลื่อนขึ้น">${svg('up', 18)}</button>
+          <button class="icon-btn sm" data-act="cat-down" data-id="${esc(c.id)}" type="button" ${i === cats.length - 1 ? 'disabled' : ''} aria-label="เลื่อนลง">${svg('down', 18)}</button>
+        </div>
+        <div class="grow">
+          <input class="input" data-catname="${esc(c.id)}" type="text" value="${esc(c.name)}" />
+          <div class="help">${n} เมนู</div>
+        </div>
+        <label class="mgr-field"><span class="help">โปรของหมวด</span>
+          <select class="input" data-catpromo="${esc(c.id)}">${promoOptions(c.promoId)}</select></label>
+        <button class="btn ${c.hidden ? 'btn-outline' : 'btn-ghost'}" data-act="cat-toggle" data-id="${esc(c.id)}" type="button">${svg(c.hidden ? 'eyeoff' : 'eye', 18)} ${c.hidden ? 'ซ่อนอยู่' : 'แสดง'}</button>
+        <button class="icon-btn danger" data-act="cat-del" data-id="${esc(c.id)}" type="button" aria-label="ลบหมวด">${svg('trash')}</button>
+      </div>`;
+    }).join('')}
+    <div class="mgr-add">
+      <input class="input grow" id="newCatName" type="text" placeholder="ชื่อหมวดหมู่ใหม่ เช่น เครื่องดื่ม" />
+      <button class="btn btn-primary" data-act="cat-add" type="button">${svg('plus', 18)} เพิ่มหมวดหมู่</button>
+    </div>`;
+}
+
+async function catAction(act, id) {
+  const cats = state.catalog.categories;
+  const i = cats.findIndex((c) => c.id === id);
+  if (act === 'cat-add') {
+    const name = ($('#newCatName').value || '').trim();
+    if (!name) return toast('กรุณาใส่ชื่อหมวดหมู่', 'warn');
+    cats.push({ id: `c_${uid()}`, name, hidden: false, promoId: '' });
+  } else if (i < 0) {
+    return;
+  } else if (act === 'cat-up' && i > 0) {
+    [cats[i - 1], cats[i]] = [cats[i], cats[i - 1]];
+  } else if (act === 'cat-down' && i < cats.length - 1) {
+    [cats[i + 1], cats[i]] = [cats[i], cats[i + 1]];
+  } else if (act === 'cat-toggle') {
+    cats[i].hidden = !cats[i].hidden;
+  } else if (act === 'cat-del') {
+    const n = state.catalog.items.filter((it) => it.categoryId === id).length;
+    if (n) return toast(`ย้ายหรือลบเมนูในหมวดนี้ก่อน (${n} เมนู)`, 'warn', 3500);
+    if (cats.length <= 1) return toast('ต้องมีอย่างน้อย 1 หมวดหมู่', 'warn');
+    const r = await confirmDialog({ title: 'ลบหมวดหมู่', html: `ลบหมวด <b>${esc(cats[i].name)}</b> ?`, okText: 'ลบ', danger: true });
+    if (!r.ok) return;
+    cats.splice(i, 1);
+  }
+  commitCatalog();
+  renderManager();
+}
+
+/* ---------- Promotions tab ---------- */
+function promoMembers(pid) {
+  return state.catalog.items.filter((it) => { const p = effectivePromo(it); return p && p.id === pid; });
+}
+function mgrPromosHTML() {
+  const unitItems = state.catalog.items.filter((it) => it.mode === 'unit');
+  return `
+    <p class="help" style="margin:0 0 12px">โปรคละได้ (Mix &amp; Match): ครบ X ชิ้นจากเมนูที่เลือก = Y บาท · ระบบจับชุดจากชิ้นที่ราคาสูงสุดก่อน · ใช้ได้กับเมนู “ขายเป็นชิ้น”</p>
+    ${state.catalog.promos.map((p) => {
+      const members = new Set(state.catalog.items.filter((it) => {
+        if (it.mode !== 'unit' || it.promoId === 'none') return false;
+        const pid = it.promoId || (IDX.cat[it.categoryId] ? IDX.cat[it.categoryId].promoId : '');
+        return pid === p.id;
+      }).map((x) => x.id));
+      const prices = [...members].map((id) => IDX.item[id].price);
+      const sample = prices.length ? Math.max(...prices) * p.size : 0;
+      return `
+      <div class="promo-card ${p.active ? '' : 'is-off'}">
+        <div class="promo-head">
+          <input class="input grow" data-promo="${esc(p.id)}" data-f="name" type="text" value="${esc(p.name)}" />
+          <button class="btn ${p.active ? 'btn-ok' : 'btn-ghost'}" data-act="promo-toggle" data-id="${esc(p.id)}" type="button">${p.active ? 'เปิดใช้งาน' : 'ปิดอยู่'}</button>
+          <button class="icon-btn danger" data-act="promo-del" data-id="${esc(p.id)}" type="button" aria-label="ลบโปร">${svg('trash')}</button>
+        </div>
+        <div class="promo-rule">
+          <span>ครบ</span><input class="input num-in" data-promo="${esc(p.id)}" data-f="size" type="number" inputmode="numeric" min="2" value="${p.size}" /><span>ชิ้น</span>
+          <span>ราคา</span><input class="input num-in" data-promo="${esc(p.id)}" data-f="price" type="number" inputmode="decimal" min="0" value="${p.price}" /><span>บาท</span>
+          ${sample ? `<span class="help">ตัวอย่าง: ปกติ ${money(sample)} → ${money(p.price)} (ลด ${money(Math.max(0, sample - p.price))}/ชุด)</span>` : ''}
+        </div>
+        <div class="help" style="margin:8px 0 4px">เมนูที่ร่วมโปรนี้ (${members.size})</div>
+        <div class="member-grid">
+          ${unitItems.map((it) => `
+            <label class="member ${members.has(it.id) ? 'on' : ''}">
+              <input type="checkbox" data-member="${esc(p.id)}" data-item="${esc(it.id)}" ${members.has(it.id) ? 'checked' : ''} />
+              <span>${esc(it.name)} <small>${money(it.price)}</small></span>
+            </label>`).join('')}
+        </div>
+      </div>`;
+    }).join('') || '<div class="empty-state">ยังไม่มีโปรโมชั่น</div>'}
+    <div class="mgr-add"><button class="btn btn-primary" data-act="promo-add" type="button">${svg('plus', 18)} เพิ่มโปรโมชั่นคละได้</button></div>`;
+}
+
+function togglePromoMember(pid, itemId, on) {
+  const it = IDX.item[itemId];
+  if (!it) return;
+  const cat = IDX.cat[it.categoryId];
+  const catPid = cat ? cat.promoId : '';
+  if (on) it.promoId = catPid === pid ? '' : pid;
+  else it.promoId = catPid === pid ? 'none' : '';
+  commitCatalog();
+  renderManager();
+}
+
+async function promoAction(act, id) {
+  const promos = state.catalog.promos;
+  if (act === 'promo-add') {
+    promos.push({ id: `p_${uid()}`, name: 'โปรใหม่ 2 ชิ้น', size: 2, price: 0, active: true });
+  } else if (act === 'promo-toggle') {
+    const p = IDX.promo[id];
+    if (p) p.active = !p.active;
+  } else if (act === 'promo-del') {
+    const p = IDX.promo[id];
+    if (!p) return;
+    const r = await confirmDialog({ title: 'ลบโปรโมชั่น', html: `ลบ <b>${esc(p.name)}</b> ? เมนูที่ผูกไว้จะไม่ร่วมโปรนี้อีก`, okText: 'ลบ', danger: true });
+    if (!r.ok) return;
+    state.catalog.promos = promos.filter((x) => x.id !== id);
+    state.catalog.categories.forEach((c) => { if (c.promoId === id) c.promoId = ''; });
+    state.catalog.items.forEach((it) => { if (it.promoId === id) it.promoId = ''; });
+  }
+  commitCatalog();
+  renderManager();
+}
+
+/* ---------- Stock tab ---------- */
+function mgrStockHTML() {
+  const seen = new Set();
+  const groups = state.catalog.categories.map((c) => {
+    const pools = [];
+    for (const it of state.catalog.items.filter((x) => x.categoryId === c.id)) {
+      const ids = [it.stockPool, ...it.baseConsumes.map((b) => b.pool), ...it.optionGroups.flatMap((g) => g.options.map((o) => o.pool))];
+      for (const id of ids) if (id && IDX.pool[id] && !seen.has(id)) { seen.add(id); pools.push(id); }
+    }
+    return { title: c.name, pools };
+  }).filter((g) => g.pools.length);
+  const orphans = state.catalog.pools.map((p) => p.id).filter((id) => !seen.has(id));
+  if (orphans.length) groups.push({ title: 'Stock Pool ที่ยังไม่ผูกกับเมนู', pools: orphans });
+
+  const row = (id) => {
+    const p = IDX.pool[id];
+    const refs = poolRefs(id);
+    const quick = p.unit === 'g' ? [[-100, '-100g'], [100, '+100g'], [500, '+500g']] : [[-1, '-1'], [5, '+5'], [10, '+10']];
+    const thumbId = refs.length && refs[0].stockPool === id ? refs[0].id : '';
+    const img = thumbId && state.images[thumbId];
+    return `
+      <div class="stock-row" data-row="${esc(id)}">
+        <div class="stock-thumb ${img ? '' : 'none'}">${img ? `<img src="${img}" alt="" />` : svg('box', 26)}</div>
+        <div>
+          <input class="input pool-name" data-poolname="${esc(id)}" type="text" value="${esc(p.name)}" />
+          <div class="stock-meta">หน่วย: ${UNIT_LABEL[p.unit]} · ใช้กับ: ${refs.length ? esc(refs.map((r) => r.name).join(', ')) : '—'}</div>
+        </div>
+        <div class="stock-input-wrap">
+          <input class="stock-input ${state.stock[id] <= 0 ? 'zero' : ''}" data-stock="${esc(id)}" type="number" inputmode="numeric" min="0" step="1" value="${state.stock[id] || 0}" />
+          <span class="stock-unit">${UNIT_LABEL[p.unit]}</span>
+        </div>
+        <div class="quick-add">
+          ${quick.map(([n, label]) => `<button class="${n < 0 ? 'minus' : ''}" data-quick="${esc(id)}" data-n="${n}" type="button">${label}</button>`).join('')}
+          ${refs.length ? '' : `<button class="minus" data-act="pool-del" data-id="${esc(id)}" type="button" aria-label="ลบ">${svg('trash', 18)}</button>`}
+        </div>
+      </div>`;
+  };
+  return `
+    ${groups.map((g) => `<div class="stock-group"><h3>${esc(g.title)}</h3>${g.pools.map(row).join('')}</div>`).join('')}
+    <div class="stock-group">
+      <h3>เพิ่ม Stock Pool ใช้ร่วม <small>เช่น วัตถุดิบที่หลายเมนูใช้ร่วมกัน (ไอศกรีม, คุกกี้ในเซ็ต)</small></h3>
+      <div class="mgr-add">
+        <input class="input grow" id="newPoolName" type="text" placeholder="ชื่อ Stock Pool เช่น ไอศกรีมช็อกโกแลต" />
+        <select class="input" id="newPoolUnit" style="width:140px">${Object.keys(UNIT_LABEL).map((u) => `<option value="${u}">${UNIT_LABEL[u]}</option>`).join('')}</select>
+        <button class="btn btn-primary" data-act="pool-add" type="button">${svg('plus', 18)} เพิ่ม</button>
       </div>
     </div>`;
 }
@@ -1340,7 +1917,8 @@ function stockRowHTML(k) {
 function setStock(key, value, flash = true) {
   state.stock[key] = toInt(value);
   save.stock();
-  const row = $(`#m-stock [data-row="${key}"]`);
+  markDirty('stock', key);
+  const row = $$('#m-manage [data-row]').find((r) => r.dataset.row === key);
   if (row) {
     const input = row.querySelector('.stock-input');
     if (document.activeElement !== input) input.value = state.stock[key];
@@ -1351,35 +1929,279 @@ function setStock(key, value, flash = true) {
   renderCart();
 }
 
+async function poolAction(act, id) {
+  if (act === 'pool-add') {
+    const name = ($('#newPoolName').value || '').trim();
+    if (!name) return toast('กรุณาใส่ชื่อ Stock Pool', 'warn');
+    const pid = `pool_${uid()}`;
+    state.catalog.pools.push({ id: pid, name, unit: $('#newPoolUnit').value || 'pcs' });
+    state.stock[pid] = 0;
+  } else if (act === 'pool-del') {
+    if (poolRefs(id).length) return toast('Pool นี้ยังถูกใช้อยู่', 'warn');
+    const r = await confirmDialog({ title: 'ลบ Stock Pool', html: `ลบ <b>${esc(poolName(id))}</b> (คงเหลือ ${fmtNum(state.stock[id] || 0)}) ?`, okText: 'ลบ', danger: true });
+    if (!r.ok) return;
+    state.catalog.pools = state.catalog.pools.filter((p) => p.id !== id);
+    delete state.stock[id];
+  }
+  commitCatalog();
+  renderManager();
+}
+
+/* ---------- Item editor (add / edit / delete menu) ---------- */
+let ed = null;
+
+function newItemDraft() {
+  const cat = mgr.catFilter !== 'all' && IDX.cat[mgr.catFilter] ? mgr.catFilter : state.catalog.categories[0].id;
+  return Object.assign(normalizeItem({ id: `m_${uid()}`, categoryId: cat, mode: 'unit', price: 0 }), { name: '' });
+}
+
+function openItemEditor(id) {
+  const src = id ? IDX.item[id] : newItemDraft();
+  const draft = clone(src);
+  draft._bind = id ? (draft.stockPool && draft.stockPool === draft.id ? '__own__' : draft.stockPool) : '__own__';
+  ed = { draft, isNew: !id, image: undefined };
+  renderItemEditor();
+  openModal('m-item');
+}
+
+function poolSelect(path, value) {
+  return `<select class="input" data-bind="${path}">
+    <option value="" ${!value ? 'selected' : ''}>— ไม่ตัดสต็อก —</option>
+    ${state.catalog.pools.map((p) => `<option value="${esc(p.id)}" ${value === p.id ? 'selected' : ''}>${esc(p.name)} (${UNIT_LABEL[p.unit]})</option>`).join('')}
+  </select>`;
+}
+
+function renderItemEditor() {
+  const d = ed.draft;
+  const img = ed.image !== undefined ? ed.image : state.images[d.id];
+  const cat = IDX.cat[d.categoryId];
+  const catPromo = cat && IDX.promo[cat.promoId];
+  const isUnitPool = (p) => p.unit !== 'g' && p.id !== d.id;
+  const isGramPool = (p) => p.unit === 'g' && p.id !== d.id;
+  const ownExists = !ed.isNew && IDX.pool[d.id];
+  const ownLabel = ownExists ? `สต็อกของเมนูนี้เอง (คงเหลือ ${fmtNum(state.stock[d.id] || 0)})` : 'สร้างสต็อกของเมนูนี้เอง';
+  const bindSelect = (filter) => `
+    <select class="input" data-bind="_bind">
+      <option value="__own__" ${d._bind === '__own__' ? 'selected' : ''}>${esc(ownLabel)}</option>
+      <option value="" ${d._bind === '' ? 'selected' : ''}>— ไม่ตัดสต็อก (ขายได้ไม่จำกัด) —</option>
+      <optgroup label="ใช้ Stock Pool ร่วม">
+        ${state.catalog.pools.filter(filter).map((p) => `<option value="${esc(p.id)}" ${d._bind === p.id ? 'selected' : ''}>${esc(p.name)} (${UNIT_LABEL[p.unit]})</option>`).join('')}
+      </optgroup>
+    </select>`;
+
+  let modeHtml = '';
+  if (d.mode === 'unit') {
+    modeHtml = `
+      <div class="ed-row">
+        <label class="ed-field"><span>ราคาต่อชิ้น (บาท)</span><input class="input" data-bind="price" type="number" inputmode="decimal" min="0" value="${esc(d.price)}" /></label>
+        <label class="ed-field"><span>การผูกสต็อก</span>${bindSelect(isUnitPool)}</label>
+      </div>
+      <label class="ed-field"><span>โปรโมชั่นคละได้</span>
+        <select class="input" data-bind="promoId">
+          <option value="" ${!d.promoId ? 'selected' : ''}>ตามหมวดหมู่${catPromo ? ` (${esc(catPromo.name)})` : ' (ไม่มี)'}</option>
+          <option value="none" ${d.promoId === 'none' ? 'selected' : ''}>ไม่ร่วมโปรโมชั่น</option>
+          ${state.catalog.promos.map((p) => `<option value="${esc(p.id)}" ${d.promoId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+        </select></label>`;
+  } else if (d.mode === 'weight') {
+    modeHtml = `
+      <div class="ed-row">
+        <label class="ed-field"><span>ราคาต่อกรัม (บาท)</span><input class="input" data-bind="pricePerGram" type="number" inputmode="decimal" min="0" step="0.01" value="${esc(d.pricePerGram)}" /></label>
+        <label class="ed-field"><span>ขั้นต่ำ (กรัม)</span><input class="input" data-bind="minGrams" type="number" inputmode="numeric" min="1" value="${esc(d.minGrams)}" /></label>
+      </div>
+      <label class="ed-field"><span>การผูกสต็อก (กรัม)</span>${bindSelect(isGramPool)}</label>
+      <p class="help">ตอนขายจะมีหน้าต่างให้ใส่ น้ำหนักที่ขาย · น้ำหนักที่แถม · ส่วนลดเฉพาะรายการ (เหมือนซีเรียลคุกกี้)</p>`;
+  } else {
+    modeHtml = `
+      <label class="ed-field"><span>ราคาเซ็ต (บาท)</span><input class="input" data-bind="price" type="number" inputmode="decimal" min="0" value="${esc(d.price)}" /></label>
+      <div class="ed-sub">
+        <div class="ed-sub-title">สต็อกที่ตัดทุกครั้งต่อ 1 เซ็ต</div>
+        ${d.baseConsumes.map((b, i) => `
+          <div class="opt-row">
+            ${poolSelect(`baseConsumes.${i}.pool`, b.pool)}
+            <label class="opt-qty"><span>× จำนวน</span><input class="input" data-bind="baseConsumes.${i}.qty" type="number" inputmode="numeric" min="1" value="${esc(b.qty)}" /></label>
+            <button class="icon-btn danger" data-ed="base-del" data-i="${i}" type="button" aria-label="ลบ">${svg('trash', 18)}</button>
+          </div>`).join('') || '<div class="help">ยังไม่มี (เช่น คุกกี้ 1 ชิ้นต่อเซ็ต)</div>'}
+        <button class="btn btn-ghost btn-sm" data-ed="base-add" type="button">${svg('plus', 16)} เพิ่มสต็อกที่ตัดต่อเซ็ต</button>
+      </div>
+      ${d.optionGroups.map((g, gi) => `
+        <div class="ed-sub group-card">
+          <div class="opt-row">
+            <input class="input grow" data-bind="optionGroups.${gi}.name" type="text" value="${esc(g.name)}" placeholder="ชื่อกลุ่ม เช่น เลือกไอศกรีม" />
+            <select class="input" data-bind="optionGroups.${gi}.type" style="width:230px">
+              <option value="pick1" ${g.type === 'pick1' ? 'selected' : ''}>บังคับเลือก 1 อย่าง</option>
+              <option value="stepper" ${g.type === 'stepper' ? 'selected' : ''}>Add-on (ไม่บังคับ, กด +/-)</option>
+            </select>
+            <button class="icon-btn danger" data-ed="group-del" data-g="${gi}" type="button" aria-label="ลบกลุ่ม">${svg('trash', 18)}</button>
+          </div>
+          <div class="opt-head"><span>ตัวเลือก</span><span>+ราคา</span><span>ตัดสต็อกจาก</span><span>× จำนวน</span><span></span></div>
+          ${g.options.map((o, oi) => `
+            <div class="opt-grid">
+              <input class="input" data-bind="optionGroups.${gi}.options.${oi}.name" type="text" value="${esc(o.name)}" placeholder="ชื่อตัวเลือก" />
+              <input class="input" data-bind="optionGroups.${gi}.options.${oi}.price" type="number" inputmode="decimal" min="0" value="${esc(o.price)}" />
+              ${poolSelect(`optionGroups.${gi}.options.${oi}.pool`, o.pool)}
+              <input class="input" data-bind="optionGroups.${gi}.options.${oi}.qty" type="number" inputmode="numeric" min="1" value="${esc(o.qty)}" />
+              <button class="icon-btn danger" data-ed="opt-del" data-g="${gi}" data-o="${oi}" type="button" aria-label="ลบตัวเลือก">${svg('trash', 18)}</button>
+            </div>`).join('')}
+          <button class="btn btn-ghost btn-sm" data-ed="opt-add" data-g="${gi}" type="button">${svg('plus', 16)} เพิ่มตัวเลือก</button>
+        </div>`).join('')}
+      <div class="row">
+        <button class="btn btn-outline btn-sm" data-ed="group-add" data-type="pick1" type="button">${svg('plus', 16)} กลุ่มบังคับเลือก 1</button>
+        <button class="btn btn-outline btn-sm" data-ed="group-add" data-type="stepper" type="button">${svg('plus', 16)} กลุ่ม Add-on</button>
+      </div>`;
+  }
+
+  const raw = d.availability === 'soldout' && d.soldOutDate !== todayKey() ? 'normal' : d.availability;
+  const modal = $('#m-item');
+  modal.querySelector('.modal-title').textContent = ed.isNew ? 'เพิ่มเมนูใหม่' : `แก้ไขเมนู: ${d.name}`;
+  paint(modal.querySelector('.modal-body'), `
+    <div class="ed-grid">
+      <div class="ed-left">
+        <div class="ed-photo">${img ? `<img src="${img}" alt="" />` : `${svg('image', 44)}<span>ยังไม่มีรูป</span>`}</div>
+        <button class="btn btn-outline btn-block" data-ed="img" type="button">${svg('upload', 18)} ${img ? 'เปลี่ยนรูป' : 'อัปโหลดรูป'}</button>
+        ${img ? `<button class="btn btn-ghost btn-block" data-ed="img-del" type="button" style="color:var(--danger);margin-top:6px">ลบรูป</button>` : ''}
+        <p class="help">ย่ออัตโนมัติเป็น ${IMG_SIZE}×${IMG_SIZE} JPEG (≈ 25 KB) เพื่อซิงก์ขึ้น Google Sheets ได้</p>
+        <div class="ed-sub-title" style="margin-top:14px">สถานะการขาย</div>
+        <div class="avail-list">
+          ${Object.keys(AVAIL).map((k) => `<button class="avail-opt ${raw === k ? `on ${k}` : ''}" data-ed="avail" data-v="${k}" type="button">${AVAIL[k]}</button>`).join('')}
+        </div>
+      </div>
+      <div class="ed-right">
+        <label class="ed-field"><span>ชื่อเมนู *</span><input class="input" data-bind="name" type="text" value="${esc(d.name)}" placeholder="เช่น ซอฟต์คุกกี้ มัทฉะ" /></label>
+        <div class="ed-row">
+          <label class="ed-field"><span>หมวดหมู่</span>
+            <select class="input" data-bind="categoryId">${state.catalog.categories.map((c) => `<option value="${esc(c.id)}" ${d.categoryId === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+          <label class="ed-field"><span>ป้ายบนการ์ด (ไม่บังคับ)</span><input class="input" data-bind="tag" type="text" value="${esc(d.tag)}" placeholder="อัตโนมัติ เช่น 3 ชิ้น ฿100" /></label>
+        </div>
+        <div class="ed-sub-title">รูปแบบการขาย</div>
+        <div class="mode-cards">
+          ${Object.keys(MODES).map((k) => `<button class="mode-card ${d.mode === k ? 'on' : ''}" data-ed="mode" data-v="${k}" type="button"><b>${MODES[k].label}</b><small>${MODES[k].en}</small></button>`).join('')}
+        </div>
+        ${modeHtml}
+      </div>
+    </div>`);
+  modal.querySelector('.modal-foot').innerHTML = `
+    ${ed.isNew ? '' : `<button class="btn btn-danger" data-ed="delete" type="button">${svg('trash', 18)} ลบเมนูนี้</button>`}
+    <span class="grow"></span>
+    <button class="btn btn-ghost btn-lg" data-close type="button">ยกเลิก</button>
+    <button class="btn btn-primary btn-lg" data-ed="save" type="button">บันทึกเมนู</button>`;
+}
+
+function editorAction(act, el) {
+  const d = ed.draft;
+  const gi = Number(el.dataset.g);
+  if (act === 'mode') {
+    d.mode = el.dataset.v;
+    if (d.mode === 'set') d._bind = '';
+    else {
+      const p = IDX.pool[d._bind];
+      if (!d._bind || (p && (p.unit === 'g') !== (d.mode === 'weight'))) d._bind = '__own__';
+    }
+  } else if (act === 'avail') {
+    d.availability = el.dataset.v;
+    d.soldOutDate = el.dataset.v === 'soldout' ? todayKey() : '';
+  } else if (act === 'base-add') d.baseConsumes.push({ pool: '', qty: 1 });
+  else if (act === 'base-del') d.baseConsumes.splice(Number(el.dataset.i), 1);
+  else if (act === 'group-add') {
+    d.optionGroups.push({ id: `g_${uid()}`, name: el.dataset.type === 'pick1' ? 'เลือก 1 อย่าง' : 'Add-on เพิ่มเติม', type: el.dataset.type, options: [{ id: `o_${uid()}`, name: '', price: 0, pool: '', qty: 1 }] });
+  } else if (act === 'group-del') d.optionGroups.splice(gi, 1);
+  else if (act === 'opt-add') d.optionGroups[gi].options.push({ id: `o_${uid()}`, name: '', price: 0, pool: '', qty: 1 });
+  else if (act === 'opt-del') d.optionGroups[gi].options.splice(Number(el.dataset.o), 1);
+  else if (act === 'img') { imageTarget = '__editor__'; $('#imageInput').value = ''; $('#imageInput').click(); return; }
+  else if (act === 'img-del') ed.image = null;
+  else if (act === 'save') { saveItemEditor(); return; }
+  else if (act === 'delete') { deleteItem(d.id); return; }
+  renderItemEditor();
+}
+
+async function saveItemEditor() {
+  const d = ed.draft;
+  if (!String(d.name).trim()) return toast('กรุณาใส่ชื่อเมนู', 'warn');
+  if (d.mode === 'weight' && !(num(d.pricePerGram) > 0)) return toast('กรุณาใส่ราคาต่อกรัม', 'warn');
+  if (d.mode === 'set') {
+    d.baseConsumes = d.baseConsumes.filter((b) => b.pool);
+    for (const g of d.optionGroups) {
+      g.options = g.options.filter((o) => String(o.name).trim());
+      if (!String(g.name).trim()) return toast('กรุณาตั้งชื่อกลุ่มตัวเลือกให้ครบ', 'warn');
+      if (!g.options.length) return toast(`กลุ่ม “${g.name}” ต้องมีอย่างน้อย 1 ตัวเลือก`, 'warn');
+    }
+  }
+  d.name = String(d.name).trim();
+  const bind = d._bind;
+  if (d.mode === 'set') d.stockPool = '';
+  else if (bind === '__own__') {
+    d.stockPool = d.id;
+    const unit = d.mode === 'weight' ? 'g' : 'pcs';
+    const own = IDX.pool[d.id];
+    if (own) { own.name = d.name; own.unit = unit; } else state.catalog.pools.push({ id: d.id, name: d.name, unit });
+  } else d.stockPool = bind || '';
+  if (d.mode !== 'unit' && d.promoId !== 'none') d.promoId = '';
+
+  const item = normalizeItem(d);
+  const items = state.catalog.items;
+  const i = items.findIndex((x) => x.id === item.id);
+  if (i >= 0) items[i] = item; else items.push(item);
+
+  if (ed.image !== undefined) {
+    if (ed.image) {
+      await ImageStore.put(item.id, ed.image);
+      state.images[item.id] = ed.image;
+      markDirty('image', item.id);
+    } else if (state.images[item.id]) {
+      await ImageStore.remove(item.id);
+      delete state.images[item.id];
+      markDirty('image', item.id);
+    }
+  }
+  commitCatalog();
+  closeModal('m-item');
+  if (isOpen('m-manage')) renderManager();
+  toast(`บันทึกเมนู “${item.name}” แล้ว`, 'success');
+}
+
+async function deleteItem(id) {
+  const it = IDX.item[id];
+  if (!it) return;
+  const own = it.stockPool === id && IDX.pool[id];
+  const r = await confirmDialog({
+    title: 'ลบเมนู',
+    html: `ลบเมนู <b>${esc(it.name)}</b> ออกจากหน้าขาย?${own ? `<p class="help">สต็อกของเมนูนี้ (${fmtNum(state.stock[id] || 0)} ${poolUnit(id)}) จะถูกลบด้วย</p>` : ''}<p class="help">ประวัติบิลเดิมไม่หาย</p>`,
+    okText: 'ลบเมนู',
+    danger: true,
+  });
+  if (!r.ok) return;
+  state.catalog.items = state.catalog.items.filter((x) => x.id !== id);
+  reindex();
+  if (own && !poolRefs(id).length) {
+    state.catalog.pools = state.catalog.pools.filter((p) => p.id !== id);
+    delete state.stock[id];
+  }
+  if (state.images[id]) {
+    await ImageStore.remove(id);
+    delete state.images[id];
+    markDirty('image', id);
+  }
+  commitCatalog();
+  closeModal('m-item');
+  if (isOpen('m-manage')) renderManager();
+  toast('ลบเมนูแล้ว', 'success');
+}
+
 async function onImagePicked(file) {
   if (!file || !imageTarget) return;
-  const target = imageTarget;
   imageTarget = null;
   try {
     toast('กำลังย่อรูปภาพ…', '', 1200);
     const data = await compressImage(file);
-    await ImageStore.put(target, data);
-    state.images[target] = data;
-    if (isOpen('m-stock')) renderStock();
-    renderMenu();
-    toast(`บันทึกรูป ${MENU_BY_ID[target].fullName} แล้ว (${Math.round(data.length * 0.75 / 1024)} KB)`, 'success');
+    if (ed) { ed.image = data; renderItemEditor(); }
+    toast(`ย่อรูปแล้ว ${Math.round(data.length * 0.75 / 1024)} KB — กด “บันทึกเมนู” เพื่อใช้รูปนี้`, 'success', 3000);
   } catch (e) {
     console.error(e);
     toast(e.message || 'อัปโหลดรูปไม่สำเร็จ', 'error', 4000);
   }
 }
 
-async function deleteImage(menuId) {
-  const r = await confirmDialog({ title: 'ลบรูปภาพ', html: `ลบรูปของ <b>${esc(MENU_BY_ID[menuId].fullName)}</b> ?`, okText: 'ลบรูป', danger: true });
-  if (!r.ok) return;
-  await ImageStore.remove(menuId);
-  delete state.images[menuId];
-  renderStock();
-  renderMenu();
-}
-
 /* ==========================================================================
-   14. GOOGLE SHEETS SYNC QUEUE
+   16. GOOGLE SHEETS — ORDER QUEUE
    ========================================================================== */
 
 function enqueue(action, orderId) {
@@ -1388,8 +2210,9 @@ function enqueue(action, orderId) {
   renderHeader();
 }
 
-/** Flat payload the Apps Script writes into the sheet */
 function orderSyncData(o) {
+  const addOnText = (i) => (i.addOns ? i.addOns.map((a) => `${a.name} x${a.n}`).join(', ')
+    : [i.addH ? `ไอศกรีมฮอกไกโด x${i.addH}` : '', i.addV ? `ไอศกรีมวนิลา x${i.addV}` : '', i.addC ? `คุกกี้ Gooey x${i.addC}` : ''].filter(Boolean).join(', '));
   return {
     orderId: o.id,
     status: o.status,
@@ -1399,17 +2222,19 @@ function orderSyncData(o) {
     itemsDetail: o.items.map((i) => `${i.name} (${i.detail})`).join(' | '),
     subtotal: o.subtotal,
     promoDiscount: o.promoDiscount,
-    promoDetail: o.promos.map((p) => `${p.label} x${p.bundles} (-${p.discount})`).join(', '),
+    promoDetail: (o.promos || []).map((p) => `${p.label} x${p.bundles} (-${p.discount})`).join(', '),
     itemDiscount: o.itemDiscount,
     manualDiscount: o.manualDiscount,
     totalDiscount: o.totalDiscount,
     netTotal: o.net,
     paymentMethod: o.payment.label,
+    paymentKey: o.payment.method,
     cashReceived: o.payment.cashReceived == null ? '' : o.payment.cashReceived,
     change: o.payment.change == null ? '' : o.payment.change,
     device: o.device,
     voidedAt: o.voidedAtTH || '',
     voidReason: o.voidReason || '',
+    stockDeduction: o.stockDeduction || {},
     items: o.items.map((i) => ({
       lineNo: i.lineNo,
       category: i.category,
@@ -1417,12 +2242,10 @@ function orderSyncData(o) {
       menuId: i.menuId,
       detail: i.detail,
       qty: i.qty,
-      soldGrams: i.soldG,
-      freeGrams: i.freeG,
-      mainScoop: i.main ? ICE[i.main].en : '',
-      addHokkaido: i.addH,
-      addVanilla: i.addV,
-      addGooeyCookie: i.addC,
+      soldGrams: i.soldG || 0,
+      freeGrams: i.freeG || 0,
+      options: i.options ? i.options.join(', ') : (i.main || ''),
+      addOns: addOnText(i),
       unitPrice: i.unitPrice,
       gross: i.gross,
       itemDiscount: i.itemDiscount,
@@ -1448,20 +2271,21 @@ function fetchWithTimeout(url, opts, ms) {
 }
 
 /**
- * POST as text/plain (a "simple" request → no CORS preflight).
- * Google Apps Script answers with Access-Control-Allow-Origin:* so we can usually read the JSON.
- * If the response cannot be read (CORS / redirect quirks) we retry in no-cors mode and treat the
- * opaque response as delivered — the script upserts by Order_ID so re-sends are harmless.
+ * POST as text/plain (a "simple" request → no CORS preflight). Apps Script replies with
+ * Access-Control-Allow-Origin:* so the JSON is normally readable. If it isn't (and the
+ * caller does not need the response), retry in no-cors mode and treat it as delivered —
+ * every write action is idempotent on the server.
  */
-async function postToSheet(url, bodyObj) {
+async function postToSheet(url, bodyObj, { needResponse = false, timeout = 30000 } = {}) {
   const body = JSON.stringify(bodyObj);
   const headers = { 'Content-Type': 'text/plain;charset=utf-8' };
   let res;
   try {
-    res = await fetchWithTimeout(url, { method: 'POST', headers, body, redirect: 'follow' }, 25000);
+    res = await fetchWithTimeout(url, { method: 'POST', headers, body, redirect: 'follow' }, timeout);
   } catch (err) {
     if (err && err.name === 'AbortError') throw new Error('หมดเวลาเชื่อมต่อ (timeout)');
-    await fetchWithTimeout(url, { method: 'POST', mode: 'no-cors', headers, body }, 25000);
+    if (needResponse) throw new Error('อ่านข้อมูลจาก Cloud ไม่ได้ — ตรวจสอบอินเทอร์เน็ตและการ Deploy');
+    await fetchWithTimeout(url, { method: 'POST', mode: 'no-cors', headers, body }, timeout);
     return { opaque: true };
   }
   const text = await res.text();
@@ -1476,7 +2300,7 @@ async function postToSheet(url, bodyObj) {
 async function syncNow({ silent = false } = {}) {
   if (state.syncing) return;
   const url = (state.settings.gasUrl || '').trim();
-  if (!state.queue.length) { if (!silent) toast('ข้อมูล Sync ครบแล้ว ✓', 'success'); return; }
+  if (!state.queue.length) return;
   if (!url) {
     if (!silent) { toast('กรุณาตั้งค่า Google Apps Script URL ก่อน', 'warn'); openSettings(); }
     return;
@@ -1487,9 +2311,7 @@ async function syncNow({ silent = false } = {}) {
   renderHeader();
   refreshSettingsIfOpen();
   let okCount = 0, failCount = 0, lastError = '';
-
   try {
-    // drop queue items whose order no longer exists
     state.queue = state.queue.filter((q) => state.orders.some((o) => o.id === q.orderId));
     const snapshot = state.queue.slice();
     for (let i = 0; i < snapshot.length; i += 20) {
@@ -1498,14 +2320,9 @@ async function syncNow({ silent = false } = {}) {
       let doneIds = [];
       const errors = {};
       try {
-        const res = await postToSheet(url, { source: 'ipad-pos', appVersion: APP_VERSION, device: state.settings.deviceName, actions });
+        const res = await postToSheet(url, { source: 'ipad-pos', appVersion: APP_VERSION, device: state.settings.devicePrefix, actions });
         if (res.opaque) doneIds = batch.map((q) => q.qid);
-        else {
-          for (const r of res.results || []) {
-            if (r.ok) doneIds.push(r.qid);
-            else errors[r.qid] = r.error || 'error';
-          }
-        }
+        else for (const r of res.results || []) { if (r.ok) doneIds.push(r.qid); else errors[r.qid] = r.error || 'error'; }
       } catch (err) {
         lastError = err.message || String(err);
         batch.forEach((q) => { errors[q.qid] = lastError; });
@@ -1524,7 +2341,7 @@ async function syncNow({ silent = false } = {}) {
       state.queue = state.queue.filter((q) => !doneIds.includes(q.qid));
       save.queue();
       save.orders();
-      if (lastError && !doneIds.length) break; // network/server down — stop early
+      if (lastError && !doneIds.length) break;
     }
   } finally {
     state.syncing = false;
@@ -1536,9 +2353,207 @@ async function syncNow({ silent = false } = {}) {
     if (isOpen('m-history')) renderHistory();
   }
   if (!silent || failCount) {
-    if (failCount) toast(`Sync ไม่สำเร็จ ${failCount} รายการ: ${lastError}`, 'error', 5000);
-    else toast(`Sync สำเร็จ ${okCount} รายการ ✓`, 'success');
+    if (failCount) toast(`Sync บิลไม่สำเร็จ ${failCount} รายการ: ${lastError}`, 'error', 5000);
+    else toast(`Sync บิลสำเร็จ ${okCount} รายการ ✓`, 'success');
   }
+}
+
+/* ==========================================================================
+   17. GOOGLE SHEETS — MULTI-DEVICE STATE SYNC (catalog / stock / images / settings)
+   ========================================================================== */
+
+let autoPushTimer = null;
+
+/** Remember what changed since the last successful push (timestamped, so edits made
+ *  while a push is in flight are not lost). */
+function markDirty(kind, key) {
+  const m = state.syncMeta;
+  const ts = Date.now();
+  if (kind === 'catalog') m.catalogDirty = ts;
+  else if (kind === 'settings') m.settingsDirty = ts;
+  else if (kind === 'stock') m.stockDirty[key] = ts;
+  else if (kind === 'image') m.imagesDirty[key] = ts;
+  save.syncMeta();
+  renderHeader();
+  scheduleAutoPush();
+}
+function scheduleAutoPush() {
+  if (!state.settings.autoPush || !(state.settings.gasUrl || '').trim()) return;
+  clearTimeout(autoPushTimer);
+  autoPushTimer = setTimeout(() => pushState({ silent: true }), 4000);
+}
+
+const sharedSettings = () => ({ shopName: state.settings.shopName, shopSubtitle: state.settings.shopSubtitle });
+
+/** Builds the PUSH_STATE action. `full` = overwrite everything on the cloud. */
+function buildPushPayload(full) {
+  const m = state.syncMeta;
+  const data = { device: state.settings.devicePrefix, at: isoLocal(new Date()), appVersion: APP_VERSION };
+  if (full || m.catalogDirty) data.catalog = state.catalog;
+  if (full || m.settingsDirty) data.settings = sharedSettings();
+  const stockKeys = full ? Object.keys(state.stock) : Object.keys(m.stockDirty);
+  if (stockKeys.length) {
+    data.stockSet = {};
+    for (const k of stockKeys) if (k in state.stock) data.stockSet[k] = state.stock[k];
+  }
+  const imgKeys = full ? Object.keys(state.images) : Object.keys(m.imagesDirty);
+  data.images = imgKeys.filter((id) => state.images[id]).map((id) => ({ id, data: state.images[id] }));
+  data.deletedImages = full ? [] : imgKeys.filter((id) => !state.images[id]);
+  if (full) { data.allImageIds = Object.keys(state.images); data.fullStock = true; }
+  const empty = !data.catalog && !data.settings && !data.stockSet && !data.images.length && !data.deletedImages.length;
+  return empty ? null : { qid: `state-${Date.now()}`, action: 'PUSH_STATE', data };
+}
+
+function clearDirtyUpTo(stamp) {
+  const m = state.syncMeta;
+  if (m.catalogDirty && m.catalogDirty <= stamp) m.catalogDirty = 0;
+  if (m.settingsDirty && m.settingsDirty <= stamp) m.settingsDirty = 0;
+  for (const k of Object.keys(m.stockDirty)) if (m.stockDirty[k] <= stamp) delete m.stockDirty[k];
+  for (const k of Object.keys(m.imagesDirty)) if (m.imagesDirty[k] <= stamp) delete m.imagesDirty[k];
+}
+
+async function pushState({ full = false, silent = false } = {}) {
+  const url = (state.settings.gasUrl || '').trim();
+  if (!url) { if (!silent) { toast('กรุณาตั้งค่า Google Apps Script URL ก่อน', 'warn'); openSettings(); } return false; }
+  if (!navigator.onLine) { if (!silent) toast('ออฟไลน์อยู่ — จะส่งขึ้น Cloud เมื่อออนไลน์', 'warn'); return false; }
+  if (state.cloudBusy) { scheduleAutoPush(); return false; }
+  const stamp = Date.now();
+  const action = buildPushPayload(full);
+  if (!action) { if (!silent) toast('ไม่มีการเปลี่ยนแปลงที่ต้องส่ง ✓', 'success'); return true; }
+
+  state.cloudBusy = true;
+  renderHeader();
+  refreshSettingsIfOpen();
+  try {
+    const res = await postToSheet(url, { source: 'ipad-pos', appVersion: APP_VERSION, device: state.settings.devicePrefix, actions: [action] }, { timeout: 60000 });
+    if (!res.opaque) {
+      const r = res.results && res.results[0];
+      if (!r || !r.ok) throw new Error((r && r.error) || 'PUSH_STATE failed');
+    }
+    clearDirtyUpTo(stamp);
+    state.syncMeta.lastPushAt = fmtDateTime(new Date());
+    state.syncMeta.lastStateError = '';
+    save.syncMeta();
+    if (!silent) toast(full ? 'อัปเดตเมนู/รูป/สต็อก ขึ้น Cloud ทั้งหมดแล้ว ✓' : 'ส่งการเปลี่ยนแปลงขึ้น Cloud แล้ว ✓', 'success');
+    return true;
+  } catch (e) {
+    state.syncMeta.lastStateError = e.message || String(e);
+    save.syncMeta();
+    if (!silent) toast(`ส่งขึ้น Cloud ไม่สำเร็จ: ${state.syncMeta.lastStateError}`, 'error', 5000);
+    return false;
+  } finally {
+    state.cloudBusy = false;
+    renderHeader();
+    refreshSettingsIfOpen();
+    if (isOpen('m-manage')) renderManager();
+  }
+}
+
+/**
+ * Apply a PULL_STATE result. Cloud stock already contains every synced order; orders still
+ * waiting in this device's queue are re-applied on top so nothing is double-counted or lost.
+ */
+async function applyPulledState(r) {
+  if (r.catalog) {
+    state.catalog = normalizeCatalog(r.catalog);
+    save.catalog();
+    reindex();
+  }
+  if (r.settings) {
+    if (r.settings.shopName) state.settings.shopName = String(r.settings.shopName);
+    if (r.settings.shopSubtitle != null) state.settings.shopSubtitle = String(r.settings.shopSubtitle);
+    save.settings();
+  }
+  if (r.stock && typeof r.stock === 'object') {
+    const s = sanitizeStock(r.stock, state.catalog);
+    for (const q of state.queue) {
+      const o = state.orders.find((x) => x.id === q.orderId);
+      if (!o) continue;
+      const sign = q.action === 'NEW_ORDER' ? -1 : 1;
+      for (const k in o.stockDeduction || {}) s[k] = Math.max(0, (s[k] || 0) + sign * o.stockDeduction[k]);
+    }
+    state.stock = s;
+  } else {
+    state.stock = sanitizeStock(state.stock, state.catalog);
+  }
+  save.stock();
+  if (r.images && typeof r.images === 'object') {
+    for (const id of Object.keys(state.images)) {
+      if (!r.images[id]) { await ImageStore.remove(id); delete state.images[id]; }
+    }
+    for (const [id, data] of Object.entries(r.images)) {
+      if (typeof data === 'string' && data.startsWith('data:image/') && state.images[id] !== data) {
+        await ImageStore.put(id, data);
+        state.images[id] = data;
+      }
+    }
+  }
+  if (Array.isArray(r.orders) && r.date) {
+    state.remoteOrders = { [r.date]: r.orders.map(normalizeRemoteOrder) };
+    save.remote();
+  }
+  sanitizeCart();
+  save.cart();
+  state.syncMeta.lastPullAt = fmtDateTime(new Date());
+  state.syncMeta.lastStateError = '';
+  save.syncMeta();
+  renderAll();
+  if (isOpen('m-manage')) renderManager();
+}
+
+async function pullState({ silent = false } = {}) {
+  const url = (state.settings.gasUrl || '').trim();
+  if (!url) { if (!silent) { toast('กรุณาตั้งค่า Google Apps Script URL ก่อน', 'warn'); openSettings(); } return false; }
+  if (!navigator.onLine) { if (!silent) toast('ออฟไลน์อยู่', 'warn'); return false; }
+  // 1) send this device's pending orders + edits first so they are not overwritten
+  await syncNow({ silent: true });
+  if (hasStateChanges()) {
+    const ok = await pushState({ silent: true });
+    if (!ok) { if (!silent) toast('ส่งการเปลี่ยนแปลงในเครื่องนี้ไม่สำเร็จ — ยกเลิกการดึงเพื่อป้องกันข้อมูลหาย', 'error', 5000); return false; }
+  }
+  if (state.cloudBusy) return false;
+  state.cloudBusy = true;
+  renderHeader();
+  refreshSettingsIfOpen();
+  try {
+    const res = await postToSheet(url, { source: 'ipad-pos', device: state.settings.devicePrefix, actions: [{ qid: 'pull', action: 'PULL_STATE', data: { date: todayKey() } }] }, { needResponse: true, timeout: 60000 });
+    const r = res.results && res.results[0];
+    if (!r || !r.ok) throw new Error((r && r.error) || 'PULL_STATE failed');
+    if (!r.result.catalog) {
+      if (!silent) toast('ยังไม่มีข้อมูลเมนูบน Cloud — กด “อัปเดตขึ้น Cloud” จากเครื่องหลักก่อน', 'warn', 5000);
+      return false;
+    }
+    await applyPulledState(r.result);
+    if (!silent) toast('ดึงเมนู/รูป/สต็อก ล่าสุดจาก Cloud แล้ว ✓', 'success');
+    return true;
+  } catch (e) {
+    state.syncMeta.lastStateError = e.message || String(e);
+    save.syncMeta();
+    if (!silent) toast(`ดึงข้อมูลจาก Cloud ไม่สำเร็จ: ${state.syncMeta.lastStateError}`, 'error', 5000);
+    return false;
+  } finally {
+    state.cloudBusy = false;
+    renderHeader();
+    refreshSettingsIfOpen();
+  }
+}
+
+async function confirmFullPush() {
+  const r = await confirmDialog({
+    title: 'อัปเดตขึ้น Cloud (Push from Main)',
+    html: `<p>ส่ง <b>เมนู · หมวดหมู่ · โปรโมชั่น · รูป ${Object.keys(state.images).length} รูป · สต็อกทั้งหมด</b> จากเครื่องนี้ขึ้น Google Sheets</p>
+           <p class="warn-box">ข้อมูลบน Cloud จะถูกแทนที่ด้วยข้อมูลของเครื่องนี้ (รวมจำนวนสต็อก) — ใช้กับเครื่องหลักเท่านั้น</p>`,
+    okText: 'ยืนยันอัปเดตขึ้น Cloud',
+  });
+  if (r.ok) pushState({ full: true });
+}
+
+async function syncAll() {
+  const url = (state.settings.gasUrl || '').trim();
+  if (!url) { toast('กรุณาตั้งค่า Google Apps Script URL ก่อน', 'warn'); return openSettings(); }
+  if (!state.queue.length && !hasStateChanges()) return toast('ข้อมูล Sync ครบแล้ว ✓', 'success');
+  await syncNow();
+  if (hasStateChanges()) await pushState();
 }
 
 async function testConnection() {
@@ -1548,7 +2563,7 @@ async function testConnection() {
   try {
     const res = await fetchWithTimeout(url, { method: 'GET', redirect: 'follow' }, 20000);
     const json = JSON.parse(await res.text());
-    if (json.ok) toast(`เชื่อมต่อสำเร็จ ✓ ${json.sheet ? `(${json.sheet})` : ''}`, 'success', 3500);
+    if (json.ok) toast(`เชื่อมต่อสำเร็จ ✓ ${json.sheet ? `(${json.sheet})` : ''}${json.hasCatalog ? ' · มีเมนูบน Cloud แล้ว' : ''}`, 'success', 3500);
     else toast(`เชื่อมต่อได้แต่มีข้อผิดพลาด: ${json.error}`, 'error', 5000);
   } catch (e) {
     toast('เชื่อมต่อไม่สำเร็จ — ตรวจสอบ URL และการ Deploy (Who has access: Anyone)', 'error', 5000);
@@ -1556,7 +2571,7 @@ async function testConnection() {
 }
 
 /* ==========================================================================
-   15. SETTINGS, BACKUP & MAINTENANCE
+   18. SETTINGS, BACKUP & MAINTENANCE
    ========================================================================== */
 
 function openSettings() {
@@ -1566,7 +2581,6 @@ function openSettings() {
 function refreshSettingsIfOpen() {
   if (isOpen('m-settings')) renderSettings(true);
 }
-
 function storageUsageKB() {
   let bytes = 0;
   for (let i = 0; i < localStorage.length; i++) {
@@ -1578,34 +2592,63 @@ function storageUsageKB() {
 
 function renderSettings(keepInputs = false) {
   const modal = $('#m-settings');
-  const prev = keepInputs ? {
-    url: $('#gasUrl') && $('#gasUrl').value,
-    shop: $('#shopNameInput') && $('#shopNameInput').value,
-    dev: $('#deviceInput') && $('#deviceInput').value,
-  } : {};
+  const val = (id) => ($(`#${id}`) ? $(`#${id}`).value : null);
+  const prev = keepInputs ? { url: val('gasUrl'), shop: val('shopNameInput'), sub: val('shopSubInput'), prefix: val('prefixInput') } : {};
+  const pick = (p, v) => (p != null ? p : v);
   const s = state.settings;
+  const m = state.syncMeta;
   const q = state.queue;
+  const busy = state.cloudBusy || state.syncing;
   const canShare = !!(navigator.canShare && window.File);
+  const dirtyParts = [
+    m.catalogDirty ? 'เมนู/หมวด/โปร' : '',
+    Object.keys(m.stockDirty).length ? `สต็อก ${Object.keys(m.stockDirty).length} รายการ` : '',
+    Object.keys(m.imagesDirty).length ? `รูป ${Object.keys(m.imagesDirty).length} รูป` : '',
+    m.settingsDirty ? 'ข้อมูลร้าน' : '',
+  ].filter(Boolean);
+  const toggle = (key, label, help) => `
+    <button class="switch-row" data-act="toggle" data-key="${key}" type="button" aria-pressed="${!!s[key]}">
+      <span class="switch ${s[key] ? 'on' : ''}"><span></span></span>
+      <span><b>${label}</b><small>${help}</small></span>
+    </button>`;
 
-  modal.querySelector('.modal-body').innerHTML = `
+  paint(modal.querySelector('.modal-body'), `
     <div class="section">
       <div class="section-title">Google Sheets Web App URL</div>
       <div class="row nowrap">
         <input class="input grow" id="gasUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
-          placeholder="https://script.google.com/macros/s/XXXX/exec" value="${esc(prev.url != null ? prev.url : s.gasUrl)}" />
+          placeholder="https://script.google.com/macros/s/XXXX/exec" value="${esc(pick(prev.url, s.gasUrl))}" />
         <button class="btn btn-primary" data-act="save-url" type="button">บันทึก</button>
         <button class="btn btn-outline" data-act="test-url" type="button">${svg('link', 18)} ทดสอบ</button>
       </div>
-      <p class="help">วาง URL ที่ได้จากการ Deploy Google Apps Script เป็น Web App (ลงท้ายด้วย /exec) — ดูขั้นตอนใน README.md</p>
+      <p class="help">ใช้ URL เดียวกันในทุกเครื่อง (ลงท้ายด้วย /exec) — ดูขั้นตอนใน README.md</p>
+    </div>
+
+    <div class="section sync-panel">
+      <div class="section-title">หลายเครื่อง — ซิงก์เมนู / รูป / สต็อก ผ่าน Cloud</div>
+      <div class="row" style="align-items:flex-end">
+        <label class="ed-field" style="width:220px;margin:0"><span>รหัสเครื่อง (Device Prefix)</span>
+          <input class="input" id="prefixInput" type="text" autocapitalize="characters" maxlength="10" value="${esc(pick(prev.prefix, s.devicePrefix))}" /></label>
+        <button class="btn btn-outline" data-act="save-prefix" type="button">บันทึกรหัสเครื่อง</button>
+        <span class="help grow">เลขบิล: <b>ORD-${esc(s.devicePrefix)}-${todayKey().replace(/-/g, '')}-001</b> — ตั้งให้ไม่ซ้ำกันในแต่ละเครื่อง เช่น IPAD1, IPAD2, PC1</span>
+      </div>
+      <div class="cloud-btns">
+        <button class="btn btn-primary btn-lg" data-act="push-full" type="button" ${busy ? 'disabled' : ''}>☁️ อัปเดตเมนู/รูป/สต็อก ขึ้น Cloud<small>Push from Main</small></button>
+        <button class="btn btn-outline btn-lg" data-act="pull" type="button" ${busy ? 'disabled' : ''}>📥 ดึงเมนู/รูป/สต็อก ล่าสุดจาก Cloud<small>Pull to this Device</small></button>
+      </div>
+      ${toggle('autoPush', 'ส่งการเปลี่ยนแปลงขึ้น Cloud อัตโนมัติ', 'เมื่อแก้เมนู อัปโหลดรูป หรือแก้สต็อก (แนะนำให้เปิดในเครื่องหลัก)')}
+      ${toggle('autoPull', 'ซิงก์ข้อมูลเมนูและสต็อกจาก Cloud อัตโนมัติเมื่อเปิดแอป', 'เหมาะกับเครื่องรอง — เปิดแอปแล้วได้เมนู รูป และสต็อกล่าสุดทันที')}
       <dl class="kv" style="margin-top:10px">
-        <dt>Sync ล่าสุด</dt><dd>${esc(s.lastSyncAt || '-')}</dd>
-        <dt>สถานะ</dt><dd>${s.lastSyncError ? `<span style="color:var(--danger)">${esc(s.lastSyncError)}</span>` : (s.lastSyncAt ? '<span style="color:var(--ok)">สำเร็จ</span>' : '-')}</dd>
+        <dt>ส่งขึ้นล่าสุด</dt><dd>${esc(m.lastPushAt || '-')}</dd>
+        <dt>ดึงล่าสุด</dt><dd>${esc(m.lastPullAt || '-')}</dd>
+        <dt>รอส่งขึ้น Cloud</dt><dd>${dirtyParts.length ? `<span style="color:var(--warn)">${esc(dirtyParts.join(' · '))}</span>` : '<span style="color:var(--ok)">ไม่มี ✓</span>'}</dd>
+        ${m.lastStateError ? `<dt>ข้อผิดพลาด</dt><dd style="color:var(--danger)">${esc(m.lastStateError)}</dd>` : ''}
       </dl>
     </div>
 
     <div class="section">
       <div class="row" style="margin-bottom:10px">
-        <div class="section-title grow" style="margin:0">คิวรอ Sync (${q.length})</div>
+        <div class="section-title grow" style="margin:0">คิวบิลรอ Sync (${q.length})</div>
         <button class="btn btn-primary" data-act="sync-all" type="button" ${state.syncing || !q.length ? 'disabled' : ''}>
           ${svg('cloud', 18)} ${state.syncing ? 'กำลัง Sync…' : 'Sync ข้อมูลทั้งหมดตอนนี้'}
         </button>
@@ -1615,26 +2658,27 @@ function renderSettings(keepInputs = false) {
           <span class="pill ${it.action === 'VOID_ORDER' ? 'pill-void' : 'pill-mute'}">${it.action}</span>
           <div class="grow"><b>${esc(it.orderId)}</b> <span class="help">${esc(it.createdAt.replace('T', ' ').slice(0, 19))}</span>
             ${it.lastError ? `<div class="q-err">พยายาม ${it.attempts} ครั้ง: ${esc(it.lastError)}</div>` : ''}</div>
-        </div>`).join('')}</div>` : '<div class="ok-box">ไม่มีรายการค้าง — ข้อมูลทั้งหมด Sync แล้ว ✓</div>'}
+        </div>`).join('')}</div>` : '<div class="ok-box">ไม่มีบิลค้าง — Sync แล้วทั้งหมด ✓</div>'}
+      <p class="help">Sync บิลล่าสุด: ${esc(s.lastSyncAt || '-')}${s.lastSyncError ? ` · <span style="color:var(--danger)">${esc(s.lastSyncError)}</span>` : ''}</p>
     </div>
 
     <div class="section">
-      <div class="section-title">ข้อมูลร้าน / อุปกรณ์</div>
+      <div class="section-title">ข้อมูลร้าน <small>(ซิงก์ไปทุกเครื่อง)</small></div>
       <div class="row">
         <div class="grow"><label class="field-label" for="shopNameInput">ชื่อร้าน</label>
-          <input class="input" id="shopNameInput" type="text" value="${esc(prev.shop != null ? prev.shop : s.shopName)}" /></div>
-        <div class="grow"><label class="field-label" for="deviceInput">ชื่ออุปกรณ์ (ส่งไปที่ Sheet)</label>
-          <input class="input" id="deviceInput" type="text" value="${esc(prev.dev != null ? prev.dev : s.deviceName)}" /></div>
+          <input class="input" id="shopNameInput" type="text" value="${esc(pick(prev.shop, s.shopName))}" /></div>
+        <div class="grow"><label class="field-label" for="shopSubInput">คำโปรย / Subtitle</label>
+          <input class="input" id="shopSubInput" type="text" value="${esc(pick(prev.sub, s.shopSubtitle))}" /></div>
       </div>
       <div class="row" style="margin-top:10px"><button class="btn btn-outline" data-act="save-shop" type="button">บันทึกข้อมูลร้าน</button></div>
     </div>
 
     <div class="section">
       <div class="section-title">สำรองข้อมูล (Backup)</div>
-      <p class="help" style="margin:0 0 10px">ไฟล์ JSON รวม สต็อก · ประวัติบิล · คิว Sync · ตั้งค่า · รูปเมนู — ใช้ย้ายเครื่องหรือกู้คืนข้อมูล</p>
+      <p class="help" style="margin:0 0 10px">ไฟล์ JSON รวม เมนู · สต็อก · ประวัติบิล · คิว Sync · ตั้งค่า · รูปเมนู</p>
       <div class="row">
         <button class="btn btn-primary" data-act="export" type="button">${svg('download', 18)} Export Backup (JSON)</button>
-        ${canShare ? `<button class="btn btn-outline" data-act="share" type="button">${svg('share', 18)} แชร์ไฟล์ Backup (AirDrop / Files)</button>` : ''}
+        ${canShare ? `<button class="btn btn-outline" data-act="share" type="button">${svg('share', 18)} แชร์ไฟล์ Backup</button>` : ''}
         <button class="btn btn-outline" data-act="import" type="button">${svg('upload', 18)} Import Backup (JSON)</button>
       </div>
     </div>
@@ -1643,6 +2687,7 @@ function renderSettings(keepInputs = false) {
       <div class="section-title">บำรุงรักษา</div>
       <dl class="kv">
         <dt>เวอร์ชันแอป</dt><dd>${APP_VERSION}</dd>
+        <dt>เมนู / หมวด / โปร</dt><dd>${state.catalog.items.length} / ${state.catalog.categories.length} / ${state.catalog.promos.length}</dd>
         <dt>บิลทั้งหมดในเครื่อง</dt><dd>${state.orders.length} บิล</dd>
         <dt>พื้นที่ localStorage</dt><dd>~${storageUsageKB()} KB (จำกัดประมาณ 5,000 KB)</dd>
       </dl>
@@ -1650,27 +2695,20 @@ function renderSettings(keepInputs = false) {
         <button class="btn btn-outline" data-act="update-app" type="button">${svg('refresh', 18)} Update App Version</button>
         <button class="btn btn-ghost" data-act="cleanup" type="button">ล้างบิลเก่าที่ Sync แล้ว (เกิน 60 วัน)</button>
       </div>
-    </div>`;
+    </div>`);
 }
 
 function backupPayload() {
   return {
-    app: 'ipad-pos',
-    schema: 1,
-    appVersion: APP_VERSION,
-    exportedAt: isoLocal(new Date()),
-    stock: state.stock,
-    orders: state.orders,
-    queue: state.queue,
-    settings: state.settings,
-    images: state.images,
+    app: 'ipad-pos', schema: 2, appVersion: APP_VERSION, exportedAt: isoLocal(new Date()),
+    catalog: state.catalog, stock: state.stock, orders: state.orders, queue: state.queue,
+    settings: state.settings, images: state.images,
   };
 }
 function backupFileName() {
   const d = new Date();
-  return `pos-backup-${dateKey(d)}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
+  return `pos-backup-${state.settings.devicePrefix}-${dateKey(d)}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
 }
-
 function exportBackup() {
   const blob = new Blob([JSON.stringify(backupPayload())], { type: 'application/json' });
   const a = document.createElement('a');
@@ -1681,7 +2719,6 @@ function exportBackup() {
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
   toast('Export Backup แล้ว', 'success');
 }
-
 async function shareBackup() {
   try {
     const name = backupFileName();
@@ -1692,47 +2729,44 @@ async function shareBackup() {
     if (e && e.name !== 'AbortError') { console.warn(e); exportBackup(); }
   }
 }
-
 async function importBackup(file) {
   if (!file) return;
   let data;
-  try {
-    data = JSON.parse(await file.text());
-  } catch (e) {
-    return toast('ไฟล์ไม่ใช่ JSON ที่ถูกต้อง', 'error');
-  }
+  try { data = JSON.parse(await file.text()); } catch (e) { return toast('ไฟล์ไม่ใช่ JSON ที่ถูกต้อง', 'error'); }
   if (!data || data.app !== 'ipad-pos' || !Array.isArray(data.orders)) return toast('ไฟล์ Backup ไม่ถูกต้อง', 'error');
   const r = await confirmDialog({
     title: 'Import Backup',
     html: `<p>ข้อมูลในไฟล์ (Export เมื่อ ${esc(data.exportedAt || '-')}):</p>
-           <p>บิล <b>${data.orders.length}</b> · คิว Sync <b>${(data.queue || []).length}</b> · รูปภาพ <b>${Object.keys(data.images || {}).length}</b></p>
+           <p>เมนู <b>${data.catalog && Array.isArray(data.catalog.items) ? data.catalog.items.length : 'ชุดเริ่มต้น'}</b> · บิล <b>${data.orders.length}</b> · คิว Sync <b>${(data.queue || []).length}</b> · รูปภาพ <b>${Object.keys(data.images || {}).length}</b></p>
            <p class="err-box">ข้อมูลปัจจุบันในเครื่องนี้จะถูกแทนที่ทั้งหมด (ตะกร้าจะถูกล้าง)</p>`,
     okText: 'นำเข้าและแทนที่',
     danger: true,
   });
   if (!r.ok) return;
-
-  state.stock = sanitizeStock(data.stock);
+  const keepUrl = state.settings.gasUrl;
+  state.catalog = normalizeCatalog(data.catalog);
+  reindex();
+  state.stock = sanitizeStock(data.stock, state.catalog);
   state.orders = data.orders;
   state.queue = Array.isArray(data.queue) ? data.queue : [];
   state.settings = Object.assign(defaultSettings(), data.settings || {});
+  if (!state.settings.gasUrl && keepUrl) state.settings.gasUrl = keepUrl;
   state.cart = { lines: [], manualDiscount: '' };
   $('#manualDiscount').value = '';
-  const ok = save.orders() && save.stock() && save.queue() && save.settings() && save.cart();
-
+  const ok = save.catalog() && save.orders() && save.stock() && save.queue() && save.settings() && save.cart();
   await ImageStore.clear();
   state.images = {};
   for (const [id, url] of Object.entries(data.images || {})) {
-    if (MENU_BY_ID[id] && typeof url === 'string' && url.startsWith('data:image/')) {
+    if (typeof url === 'string' && url.startsWith('data:image/')) {
       await ImageStore.put(id, url);
       state.images[id] = url;
     }
   }
+  await shrinkLegacyImages();
   renderAll();
   renderSettings();
-  toast(ok ? 'นำเข้าข้อมูลสำเร็จ ✓' : 'นำเข้าแล้วบางส่วน — พื้นที่จัดเก็บไม่พอ', ok ? 'success' : 'error', 4000);
+  toast(ok ? 'นำเข้าข้อมูลสำเร็จ ✓ (กด “อัปเดตขึ้น Cloud” ถ้าต้องการให้เครื่องอื่นได้ข้อมูลนี้)' : 'นำเข้าแล้วบางส่วน — พื้นที่จัดเก็บไม่พอ', ok ? 'success' : 'error', 5000);
 }
-
 async function cleanupOldOrders() {
   const cutoff = shiftDateKey(todayKey(), -60);
   const queued = new Set(state.queue.map((q) => q.orderId));
@@ -1753,7 +2787,7 @@ async function cleanupOldOrders() {
 }
 
 /* ==========================================================================
-   16. PWA — SERVICE WORKER & UPDATE
+   19. PWA — SERVICE WORKER & UPDATE
    ========================================================================== */
 
 function swMessage(worker, msg, timeoutMs) {
@@ -1765,10 +2799,9 @@ function swMessage(worker, msg, timeoutMs) {
     worker.postMessage(msg, [ch.port2]);
   });
 }
-
 async function updateApp() {
   if (!navigator.onLine) return toast('ต้องเชื่อมต่ออินเทอร์เน็ตเพื่ออัปเดตแอป', 'warn');
-  if (state.cart.lines.length) save.cart();
+  save.cart();
   toast('กำลังดาวน์โหลดเวอร์ชันล่าสุด…', '', 4000);
   try {
     if ('serviceWorker' in navigator) {
@@ -1776,39 +2809,35 @@ async function updateApp() {
       if (reg) {
         await reg.update();
         if (reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
-        const worker = navigator.serviceWorker.controller || reg.active;
-        const res = await swMessage(worker, { type: 'REFRESH_CACHE' }, 20000);
+        const res = await swMessage(navigator.serviceWorker.controller || reg.active, { type: 'REFRESH_CACHE' }, 20000);
         if (res && res.ok === false) console.warn('cache refresh failed', res.error);
       }
     }
   } catch (e) {
     console.warn('update failed', e);
   }
-  // localStorage + IndexedDB are untouched — only app files are refreshed
   setTimeout(() => location.reload(), 300);
 }
-
 function registerSW() {
-  if (!('serviceWorker' in navigator)) return;
-  if (location.protocol === 'file:') return;
+  if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
   navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
     .then((reg) => { reg.update().catch(() => {}); })
     .catch((e) => console.warn('SW register failed', e));
 }
 
 /* ==========================================================================
-   17. EVENTS & INIT
+   20. EVENTS & INIT
    ========================================================================== */
 
+const cleanNum = (v) => v.replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
+
 function bindEvents() {
-  // header
-  $('#btnSync').addEventListener('click', () => syncNow());
-  $('#btnStock').addEventListener('click', openStock);
+  $('#btnSync').addEventListener('click', syncAll);
+  $('#btnStock').addEventListener('click', () => openManager());
   $('#btnHistory').addEventListener('click', openHistory);
   $('#btnSettings').addEventListener('click', openSettings);
   $('#btnUpdate').addEventListener('click', updateApp);
 
-  // tabs & menu
   $('#catTabs').addEventListener('click', (e) => {
     const b = e.target.closest('[data-cat]');
     if (!b) return;
@@ -1822,7 +2851,6 @@ function bindEvents() {
     if (card) onMenuTap(card.dataset.menu);
   });
 
-  // cart
   $('#cartList').addEventListener('click', (e) => {
     const b = e.target.closest('[data-act]');
     if (!b) return;
@@ -1832,15 +2860,15 @@ function bindEvents() {
     else if (b.dataset.act === 'dec') changeQty(id, -1);
     else if (b.dataset.act === 'remove') removeLine(id);
     else if (b.dataset.act === 'edit' && line) {
-      if (line.type === 'cereal') openCereal(line.menuId, line);
-      else if (line.type === 'gooey') openGooey(line);
+      if (line.type === 'weight') openWeight(line.menuId, line);
+      else if (line.type === 'set') openSet(line.menuId, line);
     }
   });
   $('#btnClearCart').addEventListener('click', clearCart);
   const manual = $('#manualDiscount');
   manual.value = state.cart.manualDiscount || '';
   manual.addEventListener('input', () => {
-    const cleaned = manual.value.replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
+    const cleaned = cleanNum(manual.value);
     if (cleaned !== manual.value) manual.value = cleaned;
     state.cart.manualDiscount = cleaned;
     save.cart();
@@ -1849,34 +2877,40 @@ function bindEvents() {
   manual.addEventListener('focus', () => manual.select());
   $('#btnCheckout').addEventListener('click', openPayment);
 
-  // generic modal close buttons
   document.addEventListener('click', (e) => {
     const c = e.target.closest('[data-close]');
     if (c) c.closest('.modal').classList.remove('open');
   });
 
-  // cereal modal
-  $('#m-cereal').addEventListener('click', (e) => {
+  // weight modal
+  $('#m-weight').addEventListener('click', (e) => {
     const f = e.target.closest('[data-field]');
-    if (f) { cerealCtx.active = f.dataset.field; return renderCereal(); }
+    if (f) { weightCtx.active = f.dataset.field; return renderWeight(); }
     const k = e.target.closest('[data-key]');
-    if (k) return cerealKey(k.dataset.key);
+    if (k) return weightKey(k.dataset.key);
     const chip = e.target.closest('[data-chip]');
     if (chip) {
-      const a = cerealCtx.active;
-      cerealCtx.f[a] = String(toInt(cerealCtx.f[a]) + Number(chip.dataset.chip));
-      return renderCereal();
+      const a = weightCtx.active;
+      weightCtx.f[a] = String(toInt(weightCtx.f[a]) + Number(chip.dataset.chip));
+      return renderWeight();
     }
-    if (e.target.closest('[data-act="cereal-ok"]')) cerealConfirm();
+    if (e.target.closest('[data-act="weight-ok"]')) weightConfirm();
   });
 
-  // gooey modal
-  $('#m-gooey').addEventListener('click', (e) => {
-    const mainBtn = e.target.closest('[data-main]');
-    if (mainBtn && !mainBtn.disabled) { gooeyCtx.main = mainBtn.dataset.main; return renderGooey(); }
-    const st = e.target.closest('[data-step]');
-    if (st && !st.disabled) return gooeyStep(st.dataset.step, Number(st.dataset.d));
-    if (e.target.closest('[data-act="gooey-ok"]')) gooeyConfirm();
+  // set modal
+  $('#m-set').addEventListener('click', (e) => {
+    const p = e.target.closest('[data-pick]');
+    if (p && !p.disabled) { setCtx.picks[p.dataset.pick] = p.dataset.o; return renderSet(); }
+    const a = e.target.closest('[data-add]');
+    if (a && !a.disabled) {
+      const g = a.dataset.add, o = a.dataset.o;
+      setCtx.adds[g] = setCtx.adds[g] || {};
+      setCtx.adds[g][o] = Math.max(0, (setCtx.adds[g][o] || 0) + Number(a.dataset.d));
+      return renderSet();
+    }
+    const q = e.target.closest('[data-qty]');
+    if (q && !q.disabled) { setCtx.qty = Math.max(1, setCtx.qty + Number(q.dataset.d)); return renderSet(); }
+    if (e.target.closest('[data-act="set-ok"]')) setConfirm();
   });
 
   // payment modal
@@ -1895,51 +2929,103 @@ function bindEvents() {
   });
   pay.addEventListener('input', (e) => {
     if (e.target.id !== 'payCash') return;
-    const cleaned = e.target.value.replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
+    const cleaned = cleanNum(e.target.value);
     if (cleaned !== e.target.value) e.target.value = cleaned;
     payCtx.cash = cleaned;
     updatePayState();
   });
 
-  // stock modal
-  const stock = $('#m-stock');
-  stock.addEventListener('click', (e) => {
+  // manager modal
+  const mm = $('#m-manage');
+  mm.addEventListener('click', (e) => {
+    const t = e.target.closest('[data-mtab]');
+    if (t) { mgr.tab = t.dataset.mtab; return renderManager(); }
+    const f = e.target.closest('[data-mcat]');
+    if (f) { mgr.catFilter = f.dataset.mcat; return renderManager(); }
     const q = e.target.closest('[data-quick]');
-    if (q) {
-      const k = q.dataset.quick;
-      return setStock(k, Math.max(0, (state.stock[k] || 0) + Number(q.dataset.n)));
+    if (q) { const k = q.dataset.quick; return setStock(k, Math.max(0, (state.stock[k] || 0) + Number(q.dataset.n))); }
+    const b = e.target.closest('[data-act]');
+    if (!b || b.disabled) return;
+    const act = b.dataset.act;
+    if (act === 'item-new') openItemEditor(null);
+    else if (act === 'item-edit') openItemEditor(b.dataset.id);
+    else if (act === 'avail') setAvailability(b.dataset.id, b.dataset.v);
+    else if (act.startsWith('cat-')) catAction(act, b.dataset.id);
+    else if (act.startsWith('promo-')) promoAction(act, b.dataset.id);
+    else if (act.startsWith('pool-')) poolAction(act, b.dataset.id);
+  });
+  mm.addEventListener('change', (e) => {
+    const el = e.target;
+    const d = el.dataset;
+    if (d.stock) return setStock(d.stock, el.value);
+    if (d.catname) { const c = IDX.cat[d.catname]; if (c && el.value.trim()) { c.name = el.value.trim(); commitCatalog(); renderManager(); } return; }
+    if (d.catpromo) { const c = IDX.cat[d.catpromo]; if (c) { c.promoId = el.value; commitCatalog(); renderManager(); } return; }
+    if (d.promo) {
+      const p = IDX.promo[d.promo];
+      if (!p) return;
+      if (d.f === 'name') p.name = el.value.trim() || p.name;
+      if (d.f === 'size') p.size = Math.max(2, toInt(el.value) || 2);
+      if (d.f === 'price') p.price = Math.max(0, num(el.value));
+      commitCatalog();
+      renderManager();
+      return;
     }
-    const img = e.target.closest('[data-img]');
-    if (img) { imageTarget = img.dataset.img; $('#imageInput').value = ''; return $('#imageInput').click(); }
-    const del = e.target.closest('[data-img-del]');
-    if (del) deleteImage(del.dataset.imgDel);
+    if (d.member) { togglePromoMember(d.member, d.item, el.checked); return; }
+    if (d.poolname) { const p = IDX.pool[d.poolname]; if (p && el.value.trim()) { p.name = el.value.trim(); commitCatalog(); } }
   });
-  stock.addEventListener('change', (e) => {
-    if (e.target.dataset.stock) setStock(e.target.dataset.stock, e.target.value);
+  mm.addEventListener('focusin', (e) => { if (e.target.dataset.stock) e.target.select(); });
+
+  // item editor
+  const mi = $('#m-item');
+  mi.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-ed]');
+    if (b && !b.disabled) editorAction(b.dataset.ed, b);
   });
-  stock.addEventListener('focusin', (e) => { if (e.target.dataset.stock) e.target.select(); });
+  mi.addEventListener('input', (e) => {
+    const el = e.target;
+    if (el.dataset.bind && el.tagName === 'INPUT') setPath(ed.draft, el.dataset.bind, el.value);
+  });
+  mi.addEventListener('change', (e) => {
+    const el = e.target;
+    if (!el.dataset.bind) return;
+    setPath(ed.draft, el.dataset.bind, el.value);
+    if (el.tagName === 'SELECT') renderItemEditor();
+  });
   $('#imageInput').addEventListener('change', (e) => onImagePicked(e.target.files && e.target.files[0]));
 
-  // history modal
+  // history
   const hist = $('#m-history');
   hist.addEventListener('click', (e) => {
     const d = e.target.closest('[data-day]');
     if (d && !d.disabled) {
       histDate = d.dataset.day === 'today' ? todayKey() : shiftDateKey(histDate, Number(d.dataset.day));
       if (histDate > todayKey()) histDate = todayKey();
-      return renderHistory();
+      renderHistory();
+      if (histScope === 'all') loadRemoteOrders();
+      return;
+    }
+    const sc = e.target.closest('[data-scope]');
+    if (sc && !sc.disabled) {
+      histScope = sc.dataset.scope;
+      renderHistory();
+      if (histScope === 'all') loadRemoteOrders();
+      return;
     }
     const v = e.target.closest('[data-void]');
     if (v) voidOrder(v.dataset.void);
   });
   hist.addEventListener('change', (e) => {
-    if (e.target.id === 'histDate' && e.target.value) { histDate = e.target.value; renderHistory(); }
+    if (e.target.id === 'histDate' && e.target.value) {
+      histDate = e.target.value;
+      renderHistory();
+      if (histScope === 'all') loadRemoteOrders();
+    }
   });
 
-  // settings modal
+  // settings
   $('#m-settings').addEventListener('click', (e) => {
     const b = e.target.closest('[data-act]');
-    if (!b) return;
+    if (!b || b.disabled) return;
     const act = b.dataset.act;
     if (act === 'save-url') {
       const url = $('#gasUrl').value.trim();
@@ -1951,10 +3037,26 @@ function bindEvents() {
       if (url) syncNow({ silent: true });
     } else if (act === 'test-url') testConnection();
     else if (act === 'sync-all') syncNow();
-    else if (act === 'save-shop') {
-      state.settings.shopName = $('#shopNameInput').value.trim() || 'Maysa.Meekanom';
-      state.settings.deviceName = $('#deviceInput').value.trim() || 'iPad-1';
+    else if (act === 'push-full') confirmFullPush();
+    else if (act === 'pull') pullState();
+    else if (act === 'toggle') {
+      const k = b.dataset.key;
+      state.settings[k] = !state.settings[k];
       save.settings();
+      renderSettings(true);
+      if (k === 'autoPush' && state.settings.autoPush && hasStateChanges()) scheduleAutoPush();
+    } else if (act === 'save-prefix') {
+      const p = sanitizePrefix($('#prefixInput').value);
+      if (!p) return toast('รหัสเครื่องใช้ได้เฉพาะ A-Z และ 0-9', 'warn');
+      state.settings.devicePrefix = p;
+      save.settings();
+      renderSettings();
+      toast(`รหัสเครื่อง: ${p}`, 'success');
+    } else if (act === 'save-shop') {
+      state.settings.shopName = $('#shopNameInput').value.trim() || 'Maysa.Meekanom';
+      state.settings.shopSubtitle = $('#shopSubInput').value.trim();
+      save.settings();
+      markDirty('settings');
       renderHeader();
       renderSettings();
       toast('บันทึกข้อมูลร้านแล้ว', 'success');
@@ -1966,24 +3068,26 @@ function bindEvents() {
   });
   $('#importInput').addEventListener('change', (e) => importBackup(e.target.files && e.target.files[0]));
 
-  // network status
-  window.addEventListener('online', () => { renderHeader(); toast('กลับมาออนไลน์แล้ว', 'success'); syncNow({ silent: true }); });
+  window.addEventListener('online', () => {
+    renderHeader();
+    toast('กลับมาออนไลน์แล้ว', 'success');
+    syncNow({ silent: true });
+    if (hasStateChanges()) scheduleAutoPush();
+  });
   window.addEventListener('offline', () => { renderHeader(); toast('ออฟไลน์ — ระบบยังขายได้ตามปกติ', 'warn'); });
 
-  // Escape closes the top-most modal (keyboard users)
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     const open = $$('.modal.open');
     if (open.length && open[open.length - 1].id !== 'm-confirm') open[open.length - 1].classList.remove('open');
   });
-
-  // iOS: block pinch-zoom gestures
   document.addEventListener('gesturestart', (e) => e.preventDefault());
 
-  // keep other tabs in sync (e.g. desktop testing)
   window.addEventListener('storage', (e) => {
     if (!e.key || !e.key.startsWith('pos.v1.')) return;
-    state.stock = sanitizeStock(lsGet(LS.stock, null));
+    state.catalog = normalizeCatalog(lsGet(LS.catalog, null));
+    reindex();
+    state.stock = sanitizeStock(lsGet(LS.stock, null), state.catalog);
     state.orders = lsGet(LS.orders, []);
     state.queue = lsGet(LS.queue, []);
     renderAll();
@@ -1991,15 +3095,21 @@ function bindEvents() {
 }
 
 async function init() {
-  $$('[data-icon]').forEach((el) => { el.innerHTML = svg(el.dataset.icon, el.classList.contains('brand-logo') ? 28 : 20); });
+  $$('[data-icon]').forEach((el) => { el.innerHTML = svg(el.dataset.icon, 20); });
+  if (state.migrated) {
+    save.catalog();
+    save.stock();
+    save.cart();
+  }
+  save.settings();
   bindEvents();
-  renderTabs();
   renderClock();
   setInterval(renderClock, 1000);
   renderAll();
 
   try {
     state.images = await ImageStore.getAll();
+    await shrinkLegacyImages();
     renderMenu();
   } catch (e) {
     console.warn('image load failed', e);
@@ -2008,11 +3118,23 @@ async function init() {
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   registerSW();
 
-  // background sync loop
-  setTimeout(() => syncNow({ silent: true }), 2500);
+  const hasUrl = () => !!(state.settings.gasUrl || '').trim();
+  setTimeout(async () => {
+    if (state.settings.autoPull && hasUrl() && navigator.onLine) {
+      const ok = await pullState({ silent: true });
+      if (ok) toast('ซิงก์เมนูและสต็อกล่าสุดจาก Cloud แล้ว ✓', 'success');
+    } else {
+      syncNow({ silent: true });
+      if (hasStateChanges()) scheduleAutoPush();
+    }
+  }, 1500);
   setInterval(() => { if (state.queue.length && navigator.onLine) syncNow({ silent: true }); }, 60000);
+
+  let hiddenAt = Date.now();
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && state.queue.length) syncNow({ silent: true });
+    if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+    if (state.queue.length) syncNow({ silent: true });
+    if (state.settings.autoPull && hasUrl() && !state.cart.lines.length && Date.now() - hiddenAt > 3 * 60000) pullState({ silent: true });
   });
 }
 

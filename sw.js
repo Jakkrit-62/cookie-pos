@@ -6,7 +6,7 @@
    localStorage / IndexedDB are never touched by this file.
    ========================================================================== */
 
-const SW_VERSION = '1.0.2';
+const SW_VERSION = '2.0.0';
 const CACHE_PREFIX = 'ipad-pos-';
 const CACHE_NAME = `${CACHE_PREFIX}${SW_VERSION}`;
 const NETWORK_TIMEOUT_MS = 4000;
