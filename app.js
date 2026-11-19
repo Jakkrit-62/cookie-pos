@@ -6,13 +6,55 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '2.0.0';
+const APP_VERSION = '3.0.0';
 
 /* ==========================================================================
    1. CONSTANTS
    ========================================================================== */
 
-const UNIT_LABEL = { pcs: 'ชิ้น', g: 'กรัม', scoop: 'สกู๊ป' };
+/** Built-in units / payment methods — the shop can add more in the app (catalog.units / catalog.payMethods). */
+const DEFAULT_UNITS = [{ id: 'pcs', label: 'ชิ้น' }, { id: 'g', label: 'กรัม' }, { id: 'scoop', label: 'สกู๊ป' }];
+const DEFAULT_PAY_METHODS = [
+  { id: 'cash', label: 'เงินสด', en: 'Cash', kind: 'cash', icon: 'cash', active: true },
+  { id: 'qr', label: 'สแกน QR', en: 'PromptPay QR', kind: 'promptpay', icon: 'qr', active: true },
+  { id: 'tcp', label: 'ไทยช่วยไทยพลัส', en: 'Thai Chuay Thai Plus', kind: 'other', icon: 'gov', active: true },
+];
+const PAY_KINDS = { cash: 'เงินสด (มีเงินทอน · นับเข้าลิ้นชัก)', promptpay: 'พร้อมเพย์ (แสดง QR ตามยอด)', other: 'อื่น ๆ (บัตร / แอปเดลิเวอรี / โครงการรัฐ)' };
+const PAY_ICONS = ['cash', 'qr', 'gov', 'card', 'phone', 'bike', 'tag'];
+const DEFAULT_QUICK_NOTES = ['แยกถุง', 'ใส่กล่อง', 'อุ่นร้อน', 'ไม่รับช้อน', 'กินที่ร้าน', 'กลับบ้าน'];
+const DEFAULT_STOCK_REASONS = [
+  { id: 'restock', label: 'เติมสต็อก / อบใหม่', sign: 1 },
+  { id: 'waste', label: 'ของเสีย / หมดอายุ', sign: -1 },
+  { id: 'free', label: 'แจกฟรี / ให้ชิม', sign: -1 },
+  { id: 'staff', label: 'พนักงานใช้ / ทาน', sign: -1 },
+  { id: 'count', label: 'นับสต็อกปรับยอด', sign: 0 },
+];
+const PERMS = {
+  void: 'ยกเลิกบิล (VOID)',
+  discount: 'ให้ส่วนลดเพิ่มเติม (Manual)',
+  manage: 'แก้เมนู / ราคา / โปร',
+  stock: 'ปรับสต็อก',
+  settings: 'ตั้งค่า & Cloud Sync',
+  cashMove: 'เงินเข้า-ออกลิ้นชัก',
+  reports: 'ดูรายงาน / กำไร',
+};
+const defaultPrefs = () => ({
+  lowDefaults: { unit: 5, weight: 200, set: 3 },
+  promptpayId: '',
+  promptpayName: '',
+  receipt: { address: '', taxId: '', phone: '', footer: 'ขอบคุณที่อุดหนุนค่ะ 🍪', width: '58', showDone: true },
+  loyalty: { enabled: false, spendPerPoint: 100, pointValue: 1, minRedeem: 10 },
+  perms: { void: 'owner', discount: 'owner', manage: 'owner', stock: 'owner', settings: 'owner', cashMove: 'staff', reports: 'owner' },
+  requireShift: false,
+  kds: { warnMin: 5, lateMin: 10, pollSec: 6 },
+});
+const unitLabel = (u) => {
+  const x = state.catalog.units.find((v) => v.id === u);
+  return x ? x.label : u;
+};
+const payMethods = (activeOnly) => state.catalog.payMethods.filter((m) => !activeOnly || m.active);
+const payMethod = (id) => state.catalog.payMethods.find((m) => m.id === id) || null;
+const isCashMethod = (id) => { const m = payMethod(id); return m ? m.kind === 'cash' : id === 'cash'; };
 const MODES = {
   unit: { label: 'ขายเป็นชิ้น', en: 'Per Piece' },
   weight: { label: 'ขายตามน้ำหนัก (กรัม)', en: 'By Weight' },
@@ -23,12 +65,6 @@ const AVAIL = {
   soldout: 'ปิดขายชั่วคราววันนี้',
   hidden: 'ซ่อนจากหน้าขาย',
 };
-const PAY_METHODS = {
-  cash: { label: 'เงินสด', en: 'Cash', icon: 'cash' },
-  qr: { label: 'สแกน QR', en: 'QR Code', icon: 'qr' },
-  tcp: { label: 'ไทยช่วยไทยพลัส', en: 'Thai Chuay Thai Plus', icon: 'gov' },
-};
-const PAY_LABEL_TO_KEY = { 'เงินสด': 'cash', 'สแกน QR': 'qr', 'ไทยช่วยไทยพลัส': 'tcp' };
 
 /** Menu photos: small enough to fit one Google Sheets cell (< 50,000 chars). */
 const IMG_SIZE = 250;
@@ -50,10 +86,10 @@ function buildSeedCatalog() {
     schema: 1,
     updatedAt: '',
     categories: [
-      { id: 'soft', name: 'ซอฟต์คุกกี้', hidden: false, promoId: 'p_soft' },
-      { id: 'cereal', name: 'ซีเรียลคุกกี้', hidden: false, promoId: '' },
-      { id: 'gooey', name: 'Gooey & ไอศกรีม', hidden: false, promoId: '' },
-      { id: 'puff', name: 'ครีมพัฟ & ชูครีม', hidden: false, promoId: '' },
+      { id: 'soft', name: 'ซอฟต์คุกกี้', hidden: false, kitchen: true },
+      { id: 'cereal', name: 'ซีเรียลคุกกี้', hidden: false, kitchen: true },
+      { id: 'gooey', name: 'Gooey & ไอศกรีม', hidden: false, kitchen: true },
+      { id: 'puff', name: 'ครีมพัฟ & ชูครีม', hidden: false, kitchen: true },
     ],
     pools: [
       ...soft.map(([id, n]) => ({ id, name: `ซอฟต์คุกกี้ ${n}`, unit: 'pcs' })),
@@ -84,13 +120,13 @@ function buildSeedCatalog() {
           ] },
         ],
       }),
-      item({ id: 'puff_osaka', name: 'Osaka Cream Puff', categoryId: 'puff', mode: 'unit', price: 29, stockPool: 'puff_osaka', promoId: 'p_puff' }),
-      item({ id: 'choux_cream', name: 'ชูครีม (Choux Cream)', categoryId: 'puff', mode: 'unit', price: 12, stockPool: 'choux_cream', promoId: 'p_choux' }),
+      item({ id: 'puff_osaka', name: 'Osaka Cream Puff', categoryId: 'puff', mode: 'unit', price: 29, stockPool: 'puff_osaka' }),
+      item({ id: 'choux_cream', name: 'ชูครีม (Choux Cream)', categoryId: 'puff', mode: 'unit', price: 12, stockPool: 'choux_cream' }),
     ],
     promos: [
-      { id: 'p_soft', name: 'โปรซอฟต์คุกกี้ 3 ชิ้น 100', size: 3, price: 100, active: true },
-      { id: 'p_puff', name: 'โปรครีมพัฟ 4 ชิ้น 99', size: 4, price: 99, active: true },
-      { id: 'p_choux', name: 'โปรชูครีม 5 ชิ้น 50', size: 5, price: 50, active: true },
+      { id: 'p_soft', name: 'โปรซอฟต์คุกกี้ 3 ชิ้น 100', type: 'bundle', slots: [{ qty: 3, match: { cats: ['soft'] } }], reward: { kind: 'price', value: 100 } },
+      { id: 'p_puff', name: 'โปรครีมพัฟ 4 ชิ้น 99', type: 'bundle', slots: [{ qty: 4, match: { items: ['puff_osaka'] } }], reward: { kind: 'price', value: 99 } },
+      { id: 'p_choux', name: 'โปรชูครีม 5 ชิ้น 50', type: 'bundle', slots: [{ qty: 5, match: { items: ['choux_cream'] } }], reward: { kind: 'price', value: 50 } },
     ],
   };
 }
@@ -129,6 +165,22 @@ const ICONS = {
   upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>',
   share: '<path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8M16 6l-4-4-4 4M12 2v13"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+  note: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>',
+  pause: '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
+  printer: '<path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/>',
+  user: '<path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  chart: '<path d="M3 3v18h18"/><path d="M7 16v-4M12 16V8M17 16v-7"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  star: '<path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01Z"/>',
+  chef: '<path d="M6 13.87A4 4 0 0 1 7.41 6a5.11 5.11 0 0 1 9.18 0A4 4 0 0 1 18 13.87V21H6Z"/><path d="M6 17h12"/>',
+  tablet: '<rect x="4" y="2" width="16" height="20" rx="2"/><path d="M12 18h.01"/>',
+  card: '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/>',
+  phone: '<rect x="5" y="2" width="14" height="20" rx="2"/><path d="M12 18h.01"/>',
+  bike: '<circle cx="5.5" cy="17.5" r="3.5"/><circle cx="18.5" cy="17.5" r="3.5"/><path d="M15 6h2l3 11.5M5.5 17.5 9 10h6l-3 7.5M9 10 8 6H6"/>',
+  bell: '<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  undo: '<path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"/>',
 };
 function svg(name, size = 22) {
   return `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ''}</svg>`;
@@ -201,7 +253,10 @@ function normalizeItem(x) {
     minGrams: Math.max(1, toInt(x.minGrams == null ? 20 : x.minGrams)),
     stockPool: String(x.stockPool || ''),
     tag: String(x.tag || ''),
-    promoId: String(x.promoId || ''),
+    /** extra cost per sale (box, bag, sticker…) on top of the stock pools' cost */
+    cost: Math.max(0, num(x.cost)),
+    /** low-stock alert point ('' = shop default for this sale mode) */
+    lowAt: x.lowAt === '' || x.lowAt == null ? '' : toInt(x.lowAt),
     availability: ['normal', 'soldout', 'hidden'].includes(x.availability) ? x.availability : 'normal',
     soldOutDate: String(x.soldOutDate || ''),
     baseConsumes: (x.baseConsumes || []).filter((b) => b && b.pool).map((b) => ({ pool: String(b.pool), qty: Math.max(1, toInt(b.qty) || 1) })),
@@ -220,24 +275,67 @@ function normalizeItem(x) {
   };
 }
 
+const normId = (s, fallback) => String(s || '').trim().replace(/[^\w-]/g, '_').slice(0, 40) || fallback;
+
+function normalizePrefs(x) {
+  const d = defaultPrefs();
+  x = x && typeof x === 'object' ? x : {};
+  const merge = (def, v) => Object.assign({}, def, v && typeof v === 'object' ? v : {});
+  const p = Object.assign(d, x, {
+    lowDefaults: merge(d.lowDefaults, x.lowDefaults),
+    receipt: merge(d.receipt, x.receipt),
+    loyalty: merge(d.loyalty, x.loyalty),
+    perms: merge(d.perms, x.perms),
+    kds: merge(d.kds, x.kds),
+  });
+  for (const k of Object.keys(PERMS)) if (!['owner', 'staff'].includes(p.perms[k])) p.perms[k] = 'owner';
+  p.lowDefaults = { unit: toInt(p.lowDefaults.unit), weight: toInt(p.lowDefaults.weight), set: toInt(p.lowDefaults.set) };
+  p.loyalty.spendPerPoint = Math.max(1, num(p.loyalty.spendPerPoint) || 100);
+  p.loyalty.pointValue = Math.max(0, num(p.loyalty.pointValue));
+  p.loyalty.minRedeem = toInt(p.loyalty.minRedeem);
+  p.loyalty.enabled = !!p.loyalty.enabled;
+  p.kds = { warnMin: Math.max(1, toInt(p.kds.warnMin) || 5), lateMin: Math.max(2, toInt(p.kds.lateMin) || 10), pollSec: Math.min(60, Math.max(3, toInt(p.kds.pollSec) || 6)) };
+  p.receipt.width = String(p.receipt.width) === '80' ? '80' : '58';
+  p.receipt.showDone = p.receipt.showDone !== false;
+  p.promptpayId = String(p.promptpayId || '').replace(/[^\d]/g, '');
+  p.promptpayName = String(p.promptpayName || '');
+  p.requireShift = !!p.requireShift;
+  return p;
+}
+
 function normalizeCatalog(c) {
-  if (!c || typeof c !== 'object' || !Array.isArray(c.items)) return buildSeedCatalog();
+  if (!c || typeof c !== 'object' || !Array.isArray(c.items)) return normalizeCatalog(buildSeedCatalog());
+  const units = (Array.isArray(c.units) && c.units.length ? c.units : DEFAULT_UNITS).filter((u) => u && u.id)
+    .map((u) => ({ id: normId(u.id, 'u'), label: String(u.label || u.id) }));
+  for (const u of DEFAULT_UNITS) if (!units.some((x) => x.id === u.id)) units.unshift(Object.assign({}, u));
+  const unitIds = new Set(units.map((u) => u.id));
+  const pays = (Array.isArray(c.payMethods) && c.payMethods.length ? c.payMethods : DEFAULT_PAY_METHODS).filter((m) => m && m.id)
+    .map((m) => ({
+      id: normId(m.id, 'pay'), label: String(m.label || m.id), en: String(m.en || ''),
+      kind: PAY_KINDS[m.kind] ? m.kind : 'other', icon: PAY_ICONS.includes(m.icon) ? m.icon : 'tag', active: m.active !== false,
+    }));
+  if (!pays.some((m) => m.id === 'cash')) pays.unshift(Object.assign({}, DEFAULT_PAY_METHODS[0]));
   const out = {
-    schema: 1,
+    schema: 3,
     updatedAt: String(c.updatedAt || ''),
     categories: (c.categories || []).filter((x) => x && x.id).map((x) => ({
-      id: String(x.id), name: String(x.name || 'หมวดหมู่'), hidden: !!x.hidden, promoId: String(x.promoId || ''),
+      id: String(x.id), name: String(x.name || 'หมวดหมู่'), hidden: !!x.hidden, kitchen: x.kitchen !== false,
     })),
     pools: (c.pools || []).filter((x) => x && x.id).map((x) => ({
-      id: String(x.id), name: String(x.name || x.id), unit: UNIT_LABEL[x.unit] ? x.unit : 'pcs',
+      id: String(x.id), name: String(x.name || x.id), unit: unitIds.has(x.unit) ? x.unit : 'pcs', cost: Math.max(0, num(x.cost)),
     })),
-    promos: (c.promos || []).filter((x) => x && x.id).map((x) => ({
-      id: String(x.id), name: String(x.name || 'โปรโมชั่น'), size: Math.max(2, toInt(x.size) || 2),
-      price: Math.max(0, num(x.price)), active: x.active !== false,
-    })),
+    promos: normalizePromos(c),
     items: c.items.filter((x) => x && x.id).map(normalizeItem),
+    units,
+    payMethods: pays,
+    quickNotes: (Array.isArray(c.quickNotes) ? c.quickNotes : DEFAULT_QUICK_NOTES).map((n) => String(n).trim()).filter(Boolean).slice(0, 30),
+    stockReasons: (Array.isArray(c.stockReasons) && c.stockReasons.length ? c.stockReasons : DEFAULT_STOCK_REASONS).filter((r) => r && r.id)
+      .map((r) => ({ id: normId(r.id, 'r'), label: String(r.label || r.id), sign: [1, -1, 0].includes(Number(r.sign)) ? Number(r.sign) : 0 })),
+    staff: (Array.isArray(c.staff) ? c.staff : []).filter((x) => x && x.id && x.pinHash)
+      .map((x) => ({ id: String(x.id), name: String(x.name || 'พนักงาน'), role: x.role === 'owner' ? 'owner' : 'staff', pinHash: String(x.pinHash) })),
+    prefs: normalizePrefs(c.prefs),
   };
-  if (!out.categories.length) out.categories.push({ id: 'general', name: 'ทั่วไป', hidden: false, promoId: '' });
+  if (!out.categories.length) out.categories.push({ id: 'general', name: 'ทั่วไป', hidden: false, kitchen: true });
   const catIds = new Set(out.categories.map((x) => x.id));
   for (const it of out.items) if (!catIds.has(it.categoryId)) it.categoryId = out.categories[0].id;
   return out;
@@ -251,7 +349,8 @@ function reindex() {
   IDX = { cat: map(c.categories), item: map(c.items), pool: map(c.pools), promo: map(c.promos) };
 }
 const poolName = (id) => (IDX.pool[id] ? IDX.pool[id].name : id);
-const poolUnit = (id) => (IDX.pool[id] ? UNIT_LABEL[IDX.pool[id].unit] : '');
+const poolUnit = (id) => (IDX.pool[id] ? unitLabel(IDX.pool[id].unit) : '');
+const prefs = () => state.catalog.prefs;
 
 function itemAvailability(it) {
   const cat = IDX.cat[it.categoryId];
@@ -261,14 +360,6 @@ function itemAvailability(it) {
 }
 function visibleCategories() {
   return state.catalog.categories.filter((c) => !c.hidden);
-}
-function effectivePromo(it) {
-  if (!it || it.mode !== 'unit') return null;
-  let pid = it.promoId;
-  if (pid === 'none') return null;
-  if (!pid) { const c = IDX.cat[it.categoryId]; pid = c ? c.promoId : ''; }
-  const p = IDX.promo[pid];
-  return p && p.active ? p : null;
 }
 /** Which items reference a stock pool (for the stock manager & delete guard) */
 function poolRefs(poolId) {
@@ -285,12 +376,16 @@ function poolRefs(poolId) {
 const LS = {
   catalog: 'pos.v1.catalog',
   stock: 'pos.v1.stock',
-  orders: 'pos.v1.orders',
+  orders: 'pos.v1.orders', // legacy — orders now live in IndexedDB (OrderStore); kept only for migration / fallback
   queue: 'pos.v1.queue',
   settings: 'pos.v1.settings',
   cart: 'pos.v1.cart',
   syncMeta: 'pos.v1.syncMeta',
   remote: 'pos.v1.remoteOrders',
+  parked: 'pos.v1.parked',
+  customers: 'pos.v1.customers',
+  shift: 'pos.v1.shift',
+  session: 'pos.v1.session',
 };
 
 function lsGet(key, fallback) {
@@ -313,11 +408,21 @@ function lsSet(key, value) {
   }
 }
 
+/** Cloudflare hosting: index.html carries <meta name="pos-sync-url" content="/api/sync"> → sync goes through the protected proxy. */
+const SYNC_URL_META = ((document.querySelector('meta[name="pos-sync-url"]') || {}).content || '').trim();
+/** A device that still points straight at Apps Script (old GitHub setup / imported backup) is moved to the proxy. */
+function fixSyncUrl(settings) {
+  if (SYNC_URL_META && (!settings.gasUrl || /script\.google(usercontent)?\.com/.test(settings.gasUrl))) settings.gasUrl = SYNC_URL_META;
+  return settings;
+}
+
 const defaultSettings = () => ({
-  gasUrl: '',
+  gasUrl: SYNC_URL_META,
   shopName: 'Maysa.Meekanom',
   shopSubtitle: 'HOMEMADE BAKERY & COOKIES',
   devicePrefix: 'IPAD1',
+  deviceMode: 'pos', // 'pos' = sell at the counter · 'kds' = kitchen / order-queue screen
+  queuePrefix: '',
   autoPush: true,
   autoPull: false,
   lastSyncAt: '',
@@ -327,6 +432,7 @@ const defaultSyncMeta = () => ({
   catalogDirty: 0, settingsDirty: 0, stockDirty: {}, imagesDirty: {},
   lastPushAt: '', lastPullAt: '', lastStateError: '',
 });
+const emptyCart = () => ({ lines: [], manualDiscount: '', note: '', promoOff: [], promoMode: 'priority', customer: null, discountBy: '' });
 
 function sanitizeStock(obj, catalog) {
   const s = {};
@@ -344,19 +450,25 @@ const state = (() => {
   if (!settings.devicePrefix || !/^[A-Z0-9]{1,10}$/.test(settings.devicePrefix)) {
     settings.devicePrefix = sanitizePrefix(settings.deviceName) || 'IPAD1';
   }
-  const cart = Object.assign({ lines: [], manualDiscount: '' }, lsGet(LS.cart, {}));
+  if (!['pos', 'kds'].includes(settings.deviceMode)) settings.deviceMode = 'pos';
+  fixSyncUrl(settings);
+  const cart = Object.assign(emptyCart(), lsGet(LS.cart, {}));
   const orders = lsGet(LS.orders, []);
   const queue = lsGet(LS.queue, []);
   return {
     catalog,
-    migrated: !rawCatalog,
+    migrated: !rawCatalog || rawCatalog.schema !== 3,
     stock: sanitizeStock(lsGet(LS.stock, null), catalog),
     orders: Array.isArray(orders) ? orders : [],
     queue: Array.isArray(queue) ? queue : [],
     settings,
     syncMeta: Object.assign(defaultSyncMeta(), lsGet(LS.syncMeta, {})),
     remoteOrders: lsGet(LS.remote, {}) || {},
-    cart: { lines: Array.isArray(cart.lines) ? cart.lines : [], manualDiscount: cart.manualDiscount || '' },
+    cart: Object.assign(cart, { lines: Array.isArray(cart.lines) ? cart.lines : [], promoOff: Array.isArray(cart.promoOff) ? cart.promoOff : [] }),
+    parked: lsGet(LS.parked, []) || [],
+    customers: lsGet(LS.customers, {}) || {},
+    shift: lsGet(LS.shift, null),
+    session: lsGet(LS.session, null), // { staffId, name, role, at }
     images: {},
     category: 'all',
     syncing: false,
@@ -368,13 +480,123 @@ reindex();
 const save = {
   catalog: () => lsSet(LS.catalog, state.catalog),
   stock: () => lsSet(LS.stock, state.stock),
-  orders: () => lsSet(LS.orders, state.orders),
+  /** Persist orders to IndexedDB. Pass the changed orders (or nothing = all). Resolves to true/false. */
+  orders: (list) => OrderStore.put(list || state.orders),
   queue: () => lsSet(LS.queue, state.queue),
   settings: () => lsSet(LS.settings, state.settings),
   cart: () => lsSet(LS.cart, state.cart),
   syncMeta: () => lsSet(LS.syncMeta, state.syncMeta),
   remote: () => lsSet(LS.remote, state.remoteOrders),
+  parked: () => lsSet(LS.parked, state.parked),
+  customers: () => lsSet(LS.customers, state.customers),
+  shift: () => lsSet(LS.shift, state.shift),
+  session: () => lsSet(LS.session, state.session),
 };
+
+/* ---------- IndexedDB data store: orders, stock log, closed shifts (hundreds of MB vs ~5 MB localStorage) ---------- */
+const DataDB = (() => {
+  const DB_NAME = 'pos-data';
+  const STORES = ['orders', 'stocklog', 'shifts'];
+  let dbPromise = null;
+  function open() {
+    if (!('indexedDB' in window)) return Promise.reject(new Error('IndexedDB not supported'));
+    if (!dbPromise) {
+      dbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = () => {
+          for (const s of STORES) if (!req.result.objectStoreNames.contains(s)) req.result.createObjectStore(s, { keyPath: 'id' });
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      }).catch((e) => { dbPromise = null; throw e; });
+    }
+    return dbPromise;
+  }
+  async function tx(store, mode, fn) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const t = db.transaction(store, mode);
+      const result = fn(t.objectStore(store));
+      t.oncomplete = () => resolve(result);
+      t.onerror = () => reject(t.error);
+      t.onabort = () => reject(t.error);
+    });
+  }
+  async function all(store) {
+    const out = [];
+    await tx(store, 'readonly', (s) => {
+      const req = s.openCursor();
+      req.onsuccess = () => { const c = req.result; if (c) { out.push(c.value); c.continue(); } };
+    });
+    return out;
+  }
+  const put = (store, rows) => tx(store, 'readwrite', (s) => { for (const r of rows) s.put(JSON.parse(JSON.stringify(r))); });
+  const remove = (store, ids) => tx(store, 'readwrite', (s) => { for (const id of ids) s.delete(id); });
+  const clear = (store) => tx(store, 'readwrite', (s) => s.clear());
+  return { open, all, put, remove, clear };
+})();
+
+/** Orders: IndexedDB with automatic fallback to localStorage when IDB is unavailable. */
+const OrderStore = (() => {
+  let useLS = false;
+  async function load() {
+    try {
+      const rows = await DataDB.all('orders');
+      const legacy = lsGet(LS.orders, null);
+      if (Array.isArray(legacy) && legacy.length) {
+        const have = new Set(rows.map((o) => o.id));
+        const add = legacy.filter((o) => o && o.id && !have.has(o.id));
+        if (add.length) await DataDB.put('orders', add);
+        rows.push(...add);
+        localStorage.removeItem(LS.orders); // migrated → frees ~all of the 5 MB quota
+      }
+      return rows.sort((a, b) => ((a.createdAtISO || '') < (b.createdAtISO || '') ? -1 : 1));
+    } catch (e) {
+      console.warn('OrderStore: IndexedDB unavailable, using localStorage', e);
+      useLS = true;
+      return lsGet(LS.orders, []) || [];
+    }
+  }
+  async function put(list) {
+    if (useLS) return lsSet(LS.orders, state.orders);
+    try {
+      await DataDB.put('orders', list);
+      return true;
+    } catch (e) {
+      console.error('OrderStore put failed', e);
+      toast('บันทึกบิลลงเครื่องไม่สำเร็จ — กรุณา Export Backup', 'error', 6000);
+      return false;
+    }
+  }
+  async function remove(ids) {
+    if (useLS) return lsSet(LS.orders, state.orders);
+    try { await DataDB.remove('orders', ids); return true; } catch (e) { console.warn(e); return false; }
+  }
+  async function replaceAll(list) {
+    if (useLS) return lsSet(LS.orders, list);
+    try { await DataDB.clear('orders'); await DataDB.put('orders', list); return true; } catch (e) { console.warn(e); return false; }
+  }
+  return { load, put, remove, replaceAll, get usingLS() { return useLS; } };
+})();
+
+/** Generic modal shell created on demand (keeps index.html small). size: sm | lg | xl · z: mid | top */
+function ensureModal(id, { size = 'lg', title = '', z = '' } = {}) {
+  let m = document.getElementById(id);
+  if (m) return m;
+  m = document.createElement('div');
+  m.className = `modal${z === 'mid' ? ' modal-mid' : z === 'top' ? ' modal-top' : z === 'lock' ? ' modal-lock' : ''}`;
+  m.id = id;
+  m.setAttribute('role', 'dialog');
+  m.setAttribute('aria-modal', 'true');
+  m.innerHTML = `
+    <div class="modal-card modal-${size}">
+      <div class="modal-head"><h2 class="modal-title">${esc(title)}</h2><button class="modal-x" data-close type="button" aria-label="ปิด">&times;</button></div>
+      <div class="modal-body"></div>
+      <div class="modal-foot"></div>
+    </div>`;
+  document.body.appendChild(m);
+  return m;
+}
 
 /** v1 cart lines (cereal / gooey) → v2 (weight / set). Drops lines whose item no longer exists. */
 function sanitizeCart() {
@@ -652,42 +874,43 @@ function lineDetail(line) {
 const lineCount = (l) => (l.type === 'weight' ? 1 : l.qty);
 
 /**
- * Bill calculation. Mix-and-match bundles: units in the same promo are sorted by price
- * (highest first) and grouped into bundles of `size`; each bundle costs `price`.
+ * Bill calculation: subtotal → owner-defined promotions (promo.js) → by-weight line discounts
+ * → loyalty points → manual discount.
  */
-function calcTotals(lines, manualInput) {
+function calcTotals(lines, manualInput, opt = {}) {
   const subtotal = round2(lines.reduce((s, l) => s + lineGross(l), 0));
-  const groups = {};
-  for (const l of lines) {
-    if (l.type !== 'unit') continue;
-    const it = IDX.item[l.menuId];
-    const p = effectivePromo(it);
-    if (!p) continue;
-    groups[p.id] = groups[p.id] || [];
-    for (let i = 0; i < l.qty; i++) groups[p.id].push(it.price);
-  }
-  const promos = state.catalog.promos.filter((p) => groups[p.id]).map((p) => {
-    const prices = groups[p.id].sort((a, b) => b - a);
-    const bundles = Math.floor(prices.length / p.size);
-    let discount = 0;
-    for (let b = 0; b < bundles; b++) {
-      const sum = prices.slice(b * p.size, (b + 1) * p.size).reduce((s, x) => s + x, 0);
-      discount += Math.max(0, sum - p.price);
-    }
-    return { key: p.id, label: p.name, bundles, discount: round2(discount) };
-  }).filter((p) => p.bundles > 0 && p.discount > 0);
-  const promoDiscount = round2(promos.reduce((s, p) => s + p.discount, 0));
+  const pr = runPromoEngine(lines, opt);
+  const promoDiscount = pr.discount;
   const itemDiscount = round2(lines.reduce((s, l) => s + lineItemDiscount(l), 0));
-  const afterAuto = Math.max(0, round2(subtotal - promoDiscount - itemDiscount));
+  let left = Math.max(0, round2(subtotal - promoDiscount - itemDiscount));
+  // loyalty points redemption (before the manual discount)
+  const loy = prefs().loyalty;
+  let pointsRedeemed = 0, pointsDiscount = 0;
+  if (loy.enabled && opt.redeem > 0 && loy.pointValue > 0) {
+    pointsRedeemed = Math.min(toInt(opt.redeem), Math.floor(left / loy.pointValue));
+    pointsDiscount = round2(pointsRedeemed * loy.pointValue);
+    left = round2(left - pointsDiscount);
+  }
   const manualRequested = Math.max(0, round2(parseFloat(manualInput) || 0));
-  const manualDiscount = Math.min(manualRequested, afterAuto);
+  const manualDiscount = Math.min(manualRequested, left);
+  const net = round2(left - manualDiscount);
   return {
-    subtotal, promos, promoDiscount, itemDiscount,
+    subtotal, promos: pr.promos, promoDiscount, promoLine: pr.lineDisc, promoLive: pr.live, itemDiscount,
+    pointsRedeemed, pointsDiscount,
     manualRequested, manualDiscount,
-    totalDiscount: round2(promoDiscount + itemDiscount + manualDiscount),
-    net: round2(afterAuto - manualDiscount),
+    totalDiscount: round2(promoDiscount + itemDiscount + pointsDiscount + manualDiscount),
+    net,
+    pointsEarned: loy.enabled && opt.member ? Math.floor(net / loy.spendPerPoint) : 0,
   };
 }
+/** Totals of the current cart (promo choices, member, points). */
+function cartTotals() {
+  const c = state.cart;
+  const cust = c.customer && c.customer.phone ? c.customer : null;
+  return calcTotals(c.lines, c.manualDiscount, { off: c.promoOff, mode: c.promoMode, member: !!cust, redeem: cust ? cust.redeem : 0 });
+}
+/** Low-stock alert point of a menu (per-menu value, or the shop default for its sale mode). */
+const lowPoint = (it) => (it.lowAt === '' || it.lowAt == null ? prefs().lowDefaults[it.mode] : it.lowAt);
 
 /** Max number of sets the given stock function allows (required picks + base consumption). */
 function setCapacity(it, avail) {
@@ -713,7 +936,7 @@ function menuStatus(it, reserved) {
       blocked: a <= 0,
       manual,
       badge: it.stockPool ? `คงเหลือ ${fmtNum(Math.max(0, a))} ${poolUnit(it.stockPool)}` : 'พร้อมขาย',
-      low: isFinite(a) && a > 0 && a <= 5,
+      low: isFinite(a) && a > 0 && a <= lowPoint(it),
     };
   }
   if (it.mode === 'weight') {
@@ -723,7 +946,7 @@ function menuStatus(it, reserved) {
       blocked: a < it.minGrams,
       manual,
       badge: it.stockPool ? `${fmtNum(Math.max(0, a))} กรัม` : 'พร้อมขาย',
-      low: isFinite(a) && a >= it.minGrams && a < 200,
+      low: isFinite(a) && a >= it.minGrams && a <= lowPoint(it),
     };
   }
   const sets = setCapacity(it, av);
@@ -737,7 +960,7 @@ function menuStatus(it, reserved) {
     blocked: sets <= 0,
     manual,
     badge: isFinite(sets) ? `คงเหลือ ${Math.max(0, sets)} เซ็ต` : 'พร้อมขาย',
-    low: isFinite(sets) && sets > 0 && sets <= 3,
+    low: isFinite(sets) && sets > 0 && sets <= lowPoint(it),
     sub: parts.join(' · '),
   };
 }
@@ -821,6 +1044,8 @@ function renderHeader() {
   btn.classList.toggle('pending', n > 0);
   btn.classList.toggle('syncing', busy);
   $('#syncLabel').textContent = busy ? 'กำลัง Sync…' : (n ? `Sync Pending (${n})` : 'Synced ✓');
+  renderStaffChip();
+  renderAuthBanner();
 }
 
 function renderTabs() {
@@ -834,8 +1059,8 @@ function renderTabs() {
 
 function cardTag(it) {
   if (it.tag) return it.tag;
-  const p = effectivePromo(it);
-  if (p) return `${p.size} ชิ้น ฿${fmtNum(p.price)}`;
+  const p = cardPromo(it);
+  if (p) return promoShortTag(p);
   if (it.mode === 'weight') return 'ชั่งน้ำหนัก';
   if (it.mode === 'set') return 'เซ็ต';
   return '';
@@ -883,13 +1108,21 @@ function renderCart() {
   const lines = state.cart.lines;
   $('#cartCount').textContent = lines.reduce((s, l) => s + lineCount(l), 0);
   $('#btnClearCart').disabled = !lines.length;
+  const parkBtn = $('#btnPark');
+  if (parkBtn) {
+    parkBtn.innerHTML = `${svg('pause', 18)} พักบิล${state.parked.length ? `<span class="cnt">${state.parked.length}</span>` : ''}`;
+    parkBtn.classList.toggle('has', state.parked.length > 0);
+  }
+  const t = cartTotals();
 
   if (!lines.length) {
-    $('#cartList').innerHTML = `<div class="cart-empty">${svg('cart', 48)}<div>ยังไม่มีสินค้าในออเดอร์<br/>แตะที่เมนูเพื่อเพิ่ม</div></div>`;
+    $('#cartList').innerHTML = `<div class="cart-empty">${svg('cart', 48)}<div>ยังไม่มีสินค้าในออเดอร์<br/>แตะที่เมนูเพื่อเพิ่ม</div>
+      ${state.parked.length ? `<button class="btn btn-outline" data-act="parked" type="button">${svg('pause', 18)} บิลที่พักไว้ ${state.parked.length} บิล</button>` : ''}</div>`;
   } else {
     $('#cartList').innerHTML = lines.map((l) => {
       const gross = lineGross(l);
       const disc = lineItemDiscount(l);
+      const promo = t.promoLine[l.id] || 0;
       const editBtn = `<button class="icon-btn" data-act="edit" data-id="${l.id}" type="button" aria-label="แก้ไข">${svg('edit')}</button>`;
       const controls = l.type === 'weight'
         ? editBtn
@@ -904,30 +1137,45 @@ function renderCart() {
             <div class="cl-name">${esc(lineTitle(l))}</div>
             <div class="cl-amt">${disc ? `<s>${money(gross)}</s> ` : ''}${money(gross - disc)}</div>
           </div>
-          <div class="cl-detail">${esc(lineDetail(l))}</div>
+          <div class="cl-detail">${esc(lineDetail(l))}${promo ? ` <span class="cl-promo">โปร -${money(promo)}</span>` : ''}</div>
+          ${l.note ? `<div class="cl-note">📝 ${esc(l.note)}</div>` : ''}
           <div class="cl-actions">${controls}<span class="grow"></span>
+            <button class="icon-btn ${l.note ? 'on' : ''}" data-act="note" data-id="${l.id}" type="button" aria-label="หมายเหตุ">${svg('note')}</button>
             <button class="icon-btn danger" data-act="remove" data-id="${l.id}" type="button" aria-label="ลบ">${svg('trash')}</button>
           </div>
         </div>`;
-    }).join('');
+    }).join('') + `
+      <button class="bill-note ${state.cart.note ? 'on' : ''}" data-act="bill-note" type="button">
+        ${svg('note', 18)} <span>${state.cart.note ? `หมายเหตุบิล: <b>${esc(state.cart.note)}</b>` : 'เพิ่มหมายเหตุบิล (แยกถุง, อุ่นร้อน …)'}</span>
+      </button>`;
   }
-  renderTotals();
+  renderTotals(t);
 }
 
-function renderTotals() {
-  const t = calcTotals(state.cart.lines, state.cart.manualDiscount);
+function renderTotals(t) {
+  t = t || cartTotals();
   $('#sumSubtotal').textContent = money(t.subtotal);
-  let html = '';
-  if (!t.promos.length) {
-    html += `<div class="sum-row muted"><span>ส่วนลดโปรโมชั่นอัตโนมัติ</span><span>฿0</span></div>`;
-  } else {
-    html += `<div class="sum-row discount"><span>ส่วนลดโปรโมชั่นอัตโนมัติ</span><span>${negMoney(t.promoDiscount)}</span></div>`;
-    html += t.promos.map((p) => `<div class="sum-row sub"><span>• ${esc(p.label)} × ${p.bundles}</span><span>${negMoney(p.discount)}</span></div>`).join('');
-  }
+  const off = (state.cart.promoOff || []).length;
+  const best = state.cart.promoMode === 'best';
+  let html = `
+    <div class="sum-row ${t.promos.length ? 'discount' : 'muted'}">
+      <button class="promo-pick" data-act="promo-pick" type="button" ${state.cart.lines.length ? '' : 'disabled'}>
+        ${svg('tag', 16)} โปรโมชั่น${best ? ' · คุ้มสุด' : ''}${off ? ` · ปิด ${off}` : ''}${t.promoLive.length > t.promos.length && state.cart.lines.length ? ' · เลือกได้' : ''}
+      </button>
+      <span>${negMoney(t.promoDiscount)}</span>
+    </div>`;
+  html += t.promos.map((p) => `<div class="sum-row sub"><span>• ${esc(p.label)}${p.bundles > 1 ? ` × ${p.bundles}` : ''}</span><span>${negMoney(p.discount)}</span></div>`).join('');
   if (t.itemDiscount > 0) html += `<div class="sum-row discount"><span>ส่วนลดเฉพาะรายการ</span><span>${negMoney(t.itemDiscount)}</span></div>`;
+  const cust = state.cart.customer;
+  if (cust && cust.phone) {
+    html += `<div class="sum-row member"><span>👤 ${esc(cust.name || cust.phone)}${t.pointsEarned ? ` · ได้ ${t.pointsEarned} แต้ม` : ''}</span><span>${t.pointsDiscount ? negMoney(t.pointsDiscount) : ''}</span></div>`;
+  }
   $('#promoRows').innerHTML = html;
+  const manual = $('#manualDiscount');
+  manual.readOnly = !can('discount') && !state.cart.discountBy;
+  manual.placeholder = manual.readOnly ? '🔒' : '0';
   $('#manualNote').textContent = t.manualRequested > t.manualDiscount
-    ? `ส่วนลดเพิ่มเติมถูกจำกัดไว้ที่ ${money(t.manualDiscount)} (ไม่เกินยอดคงเหลือ)` : '';
+    ? `ส่วนลดเพิ่มเติมถูกจำกัดไว้ที่ ${money(t.manualDiscount)} (ไม่เกินยอดคงเหลือ)` : (state.cart.discountBy ? `อนุมัติส่วนลดโดย ${state.cart.discountBy}` : '');
   $('#sumNet').textContent = money(t.net);
   $('#btnCheckout').disabled = !state.cart.lines.length;
 }
@@ -993,8 +1241,11 @@ async function clearCart() {
   if (!state.cart.lines.length) return;
   const r = await confirmDialog({ title: 'ล้างตะกร้า', html: 'ต้องการลบสินค้าทั้งหมดในออเดอร์นี้หรือไม่?', okText: 'ล้างตะกร้า', danger: true });
   if (!r.ok) return;
-  state.cart.lines = [];
-  state.cart.manualDiscount = '';
+  resetCart();
+}
+/** Empty the cart (after payment, clear, or parking a bill). */
+function resetCart() {
+  state.cart = emptyCart();
   $('#manualDiscount').value = '';
   cartChanged();
 }
@@ -1249,58 +1500,108 @@ function setConfirm() {
 
 let payCtx = null;
 
-function openPayment() {
+async function openPayment() {
   if (!state.cart.lines.length) return;
   const short = cartShortages();
   if (short.length) return toast(`สต็อกไม่พอ: ${shortageText(short)} — กรุณาแก้ไขตะกร้า`, 'error', 5000);
-  payCtx = { method: null, cash: '', busy: false, openedAt: new Date() };
+  if (prefs().requireShift && !state.shift) {
+    toast('กรุณาเปิดกะก่อนขาย (กรอกเงินทอนตั้งต้น)', 'warn', 3500);
+    return openShiftPanel();
+  }
+  const methods = payMethods(true);
+  payCtx = { method: methods.length === 1 ? methods[0].id : null, cash: '', busy: false, openedAt: new Date(), phone: (state.cart.customer && state.cart.customer.phone) || '' };
+  ensureModal('m-pay', { size: 'lg', title: 'ชำระเงิน' });
   renderPayment();
   openModal('m-pay');
 }
 
+function memberPanelHTML(t) {
+  const loy = prefs().loyalty;
+  if (!loy.enabled) return '';
+  const c = state.cart.customer;
+  const known = c && c.phone ? state.customers[c.phone] : null;
+  const pts = known ? known.points : 0;
+  const canRedeem = known && loy.pointValue > 0 && pts >= Math.max(1, loy.minRedeem);
+  return `
+    <div class="member-panel">
+      <div class="section-title" style="margin:0 0 6px">สมาชิก / สะสมแต้ม <small>(ไม่บังคับ)</small></div>
+      ${c && c.phone ? `
+        <div class="row nowrap">
+          <div class="grow"><b>${esc(c.name || (known && known.name) || 'สมาชิกใหม่')}</b> · ${esc(fmtPhone(c.phone))}
+            <div class="help" style="margin:0">${known ? `แต้มสะสม <b>${fmtNum(pts)}</b> · มาแล้ว ${known.visits || 0} ครั้ง` : 'สมาชิกใหม่ — จะสร้างให้อัตโนมัติเมื่อชำระเงิน'}${t.pointsEarned ? ` · บิลนี้ได้ <b>+${t.pointsEarned}</b> แต้ม` : ''}</div></div>
+          <button class="btn btn-ghost btn-sm" data-act="member-clear" type="button">เปลี่ยน</button>
+        </div>
+        ${known ? '' : `<input class="input" id="memberName" type="text" placeholder="ชื่อลูกค้า (ไม่บังคับ)" value="${esc(c.name || '')}" style="margin-top:8px" />`}
+        ${canRedeem ? `
+          <div class="row" style="margin-top:8px">
+            <span>ใช้แต้ม</span>
+            <div class="stepper"><button data-act="redeem" data-d="-${Math.max(1, loy.minRedeem)}" type="button" aria-label="ลด">${svg('minus')}</button>
+              <span class="qty">${toInt(c.redeem)}</span>
+              <button data-act="redeem" data-d="${Math.max(1, loy.minRedeem)}" type="button" aria-label="เพิ่ม">${svg('plus')}</button></div>
+            <button class="btn btn-outline btn-sm" data-act="redeem-max" type="button">ใช้สูงสุด</button>
+            <span class="help" style="margin:0">1 แต้ม = ${money(loy.pointValue)}${loy.minRedeem > 1 ? ` · ขั้นต่ำ ${loy.minRedeem} แต้ม` : ''}</span>
+          </div>` : ''}` : `
+        <div class="row nowrap">
+          <input class="input grow" id="memberPhone" type="tel" inputmode="numeric" autocomplete="off" maxlength="12" placeholder="เบอร์โทรลูกค้า" value="${esc(payCtx.phone)}" />
+          <button class="btn btn-outline" data-act="member-find" type="button">ค้นหา/เพิ่ม</button>
+        </div>`}
+    </div>`;
+}
+
 function renderPayment() {
-  const t = calcTotals(state.cart.lines, state.cart.manualDiscount);
+  const t = cartTotals();
   const modal = $('#m-pay');
   const items = state.cart.lines.map((l) => `
     <div class="pay-item">
-      <div><div>${esc(lineTitle(l))}</div><div class="pi-detail">${esc(lineDetail(l))}</div></div>
+      <div><div>${esc(lineTitle(l))}</div><div class="pi-detail">${esc(lineDetail(l))}${l.note ? ` · 📝 ${esc(l.note)}` : ''}</div></div>
       <div class="nowrap">${money(lineGross(l) - lineItemDiscount(l))}</div>
     </div>`).join('');
+  const m = payMethod(payCtx.method);
+  let methodPanel = '';
+  if (m && m.kind === 'cash') {
+    methodPanel = `
+      <div class="cash-panel">
+        <label class="field-label" for="payCash">รับเงินมา (ไม่บังคับ)</label>
+        <input class="input" id="payCash" type="text" inputmode="decimal" autocomplete="off" placeholder="0" value="${esc(payCtx.cash)}" />
+        <div class="cash-quick">
+          <button class="btn btn-outline btn-sm" data-cash="exact" type="button">พอดี</button>
+          ${[100, 500, 1000].map((n) => `<button class="btn btn-outline btn-sm" data-cash="${n}" type="button">฿${fmtNum(n)}</button>`).join('')}
+        </div>
+        <div class="change-due" id="changeDue"></div>
+      </div>`;
+  } else if (m && m.kind === 'promptpay') {
+    const id = prefs().promptpayId;
+    methodPanel = id
+      ? `<div class="qr-panel">${promptPayQR(id, t.net)}<div><b>${money(t.net)}</b><small>พร้อมเพย์ ${esc(fmtPhone(id))}${prefs().promptpayName ? `<br/>${esc(prefs().promptpayName)}` : ''}</small><small>ให้ลูกค้าสแกนจ่าย ยอดถูกใส่ไว้แล้ว</small></div></div>`
+      : `<div class="warn-box">ยังไม่ได้ตั้งค่าเบอร์/เลขพร้อมเพย์ — ตั้งได้ที่ ตั้งค่า ▸ การชำระเงิน แล้วระบบจะสร้าง QR ตามยอดให้อัตโนมัติ</div>`;
+  }
 
   modal.querySelector('.modal-body').innerHTML = `
     <div class="pay-layout">
       <div>
         <div class="section-title">สรุปรายการ <small>${fmtDateTime(payCtx.openedAt)}</small></div>
         <div class="pay-items">${items}</div>
+        ${state.cart.note ? `<div class="cl-note" style="margin-top:6px">📝 หมายเหตุบิล: ${esc(state.cart.note)}</div>` : ''}
         <div style="margin-top:8px">
           <div class="sum-row"><span>ยอดรวมก่อนลด</span><span>${money(t.subtotal)}</span></div>
-          ${t.promos.map((p) => `<div class="sum-row discount"><span>${esc(p.label)} × ${p.bundles}</span><span>${negMoney(p.discount)}</span></div>`).join('')}
+          ${t.promos.map((p) => `<div class="sum-row discount"><span>${esc(p.label)}${p.bundles > 1 ? ` × ${p.bundles}` : ''}</span><span>${negMoney(p.discount)}</span></div>`).join('')}
           ${t.itemDiscount ? `<div class="sum-row discount"><span>ส่วนลดเฉพาะรายการ</span><span>${negMoney(t.itemDiscount)}</span></div>` : ''}
+          ${t.pointsDiscount ? `<div class="sum-row discount"><span>ใช้แต้ม ${t.pointsRedeemed} แต้ม</span><span>${negMoney(t.pointsDiscount)}</span></div>` : ''}
           ${t.manualDiscount ? `<div class="sum-row discount"><span>ส่วนลดเพิ่มเติม</span><span>${negMoney(t.manualDiscount)}</span></div>` : ''}
         </div>
         <div class="pay-net"><span class="section-title" style="margin:0">ยอดชำระสุทธิ</span><b>${money(t.net)}</b></div>
+        ${memberPanelHTML(t)}
       </div>
       <div>
         <div class="section-title">เลือกวิธีชำระเงิน</div>
         <div class="pay-methods">
-          ${Object.keys(PAY_METHODS).map((k) => `
-            <button class="pay-btn ${payCtx.method === k ? 'selected' : ''}" data-method="${k}" type="button">
-              <span class="pay-ic">${svg(PAY_METHODS[k].icon, 26)}</span>
-              <span>${PAY_METHODS[k].label}<small>${PAY_METHODS[k].en}</small></span>
+          ${payMethods(true).map((pm) => `
+            <button class="pay-btn ${payCtx.method === pm.id ? 'selected' : ''}" data-method="${esc(pm.id)}" type="button">
+              <span class="pay-ic">${svg(pm.icon, 26)}</span>
+              <span>${esc(pm.label)}<small>${esc(pm.en)}</small></span>
             </button>`).join('')}
         </div>
-        ${payCtx.method === 'cash' ? `
-          <div class="cash-panel">
-            <label class="field-label" for="payCash">รับเงินมา (ไม่บังคับ)</label>
-            <input class="input" id="payCash" type="text" inputmode="decimal" autocomplete="off" placeholder="0" value="${esc(payCtx.cash)}" />
-            <div class="cash-quick">
-              <button class="btn btn-outline btn-sm" data-cash="exact" type="button">พอดี</button>
-              <button class="btn btn-outline btn-sm" data-cash="100" type="button">฿100</button>
-              <button class="btn btn-outline btn-sm" data-cash="500" type="button">฿500</button>
-              <button class="btn btn-outline btn-sm" data-cash="1000" type="button">฿1,000</button>
-            </div>
-            <div class="change-due" id="changeDue"></div>
-          </div>` : ''}
+        ${methodPanel}
       </div>
     </div>`;
   modal.querySelector('.modal-foot').innerHTML = `
@@ -1310,11 +1611,11 @@ function renderPayment() {
 }
 
 function updatePayState() {
-  const t = calcTotals(state.cart.lines, state.cart.manualDiscount);
+  const t = cartTotals();
   const btn = $('#btnPayConfirm');
   let ok = !!payCtx.method && !payCtx.busy;
   const due = $('#changeDue');
-  if (payCtx.method === 'cash' && due) {
+  if (isCashMethod(payCtx.method) && due) {
     const received = parseFloat(payCtx.cash);
     if (payCtx.cash === '' || isNaN(received)) {
       due.className = 'change-due';
@@ -1338,19 +1639,38 @@ function nextOrderId(d) {
   }
   return prefix + pad(max + 1, 3);
 }
+/** Short queue number for the counter (#01, #02 … resets daily; optional letter per device, e.g. A01). */
+function nextQueueNo(d) {
+  const day = dateKey(d);
+  const n = state.orders.filter((o) => o.date === day && o.device === state.settings.devicePrefix).length + 1;
+  return `${state.settings.queuePrefix || ''}${pad(n, 2)}`;
+}
 
-function buildOrderItems(lines) {
+/** Stock cost of a cart line at today's pool costs + the menu's extra cost (packaging). */
+function lineCost(l, needs) {
+  const it = IDX.item[l.menuId];
+  let c = 0;
+  for (const k in needs) c += needs[k] * ((IDX.pool[k] && IDX.pool[k].cost) || 0);
+  if (it) c += it.cost * (l.type === 'weight' ? 1 : l.qty);
+  return round2(c);
+}
+
+function buildOrderItems(lines, promoLine) {
   return lines.map((l, i) => {
     const it = IDX.item[l.menuId];
     const cat = IDX.cat[it.categoryId];
     const gross = lineGross(l);
     const itemDiscount = lineItemDiscount(l);
+    const promoDiscount = round2((promoLine && promoLine[l.id]) || 0);
     const sel = l.type === 'set' ? setSelections(it, l) : { options: [], addOns: [] };
+    const needs = lineNeeds(l);
     return {
       lineNo: i + 1,
       type: l.type,
       menuId: l.menuId,
+      categoryId: it.categoryId,
       category: cat ? cat.name : '',
+      kitchen: cat ? cat.kitchen !== false : true,
       name: lineTitle(l),
       detail: lineDetail(l),
       qty: l.type === 'weight' ? 1 : l.qty,
@@ -1359,21 +1679,48 @@ function buildOrderItems(lines) {
       freeG: l.freeG || 0,
       options: sel.options,
       addOns: sel.addOns.map((a) => ({ name: a.name, n: a.n })),
+      note: l.note || '',
       gross,
       itemDiscount,
+      promoDiscount,
       net: round2(gross - itemDiscount),
-      needs: lineNeeds(l),
+      cost: lineCost(l, needs),
+      needs,
     };
   });
 }
 
-function confirmPayment() {
+/** What the kitchen screen shows for a bill (only categories marked "ส่งเข้าครัว"). */
+function kitchenTicket(items) {
+  const list = items.filter((i) => i.kitchen !== false).map((i) => ({
+    n: i.name,
+    q: i.type === 'weight' ? `${fmtNum(i.soldG)} ก.` : `×${i.qty}`,
+    o: [...(i.type === 'weight' && i.freeG ? [`+ แถม ${fmtNum(i.freeG)} ก. (รวม ${fmtNum(i.soldG + i.freeG)} ก.)`] : []),
+      ...(i.options || []), ...(i.addOns || []).map((a) => `+${a.name} ×${a.n}`)],
+    g: i.type === 'weight' ? i.soldG + i.freeG : 0,
+    note: i.note || '',
+  }));
+  const prep = {};
+  for (const i of items) {
+    if (i.kitchen === false) continue;
+    for (const k in i.needs || {}) {
+      const label = `${poolName(k)}|${poolUnit(k)}`;
+      prep[label] = (prep[label] || 0) + i.needs[k];
+    }
+  }
+  return { items: list, prep };
+}
+
+async function confirmPayment() {
   if (!payCtx || payCtx.busy || !payCtx.method) return;
   const short = cartShortages();
   if (short.length) return toast(`สต็อกไม่พอ: ${shortageText(short)}`, 'error', 5000);
-  const t = calcTotals(state.cart.lines, state.cart.manualDiscount);
+  const memberName = $('#memberName');
+  if (memberName && state.cart.customer) state.cart.customer.name = memberName.value.trim();
+  const t = cartTotals();
+  const pm = payMethod(payCtx.method);
   let cashReceived = null, change = null;
-  if (payCtx.method === 'cash' && payCtx.cash !== '') {
+  if (pm && pm.kind === 'cash' && payCtx.cash !== '') {
     cashReceived = round2(parseFloat(payCtx.cash) || 0);
     change = round2(cashReceived - t.net);
     if (change < 0) return toast('รับเงินไม่พอ', 'error');
@@ -1382,23 +1729,36 @@ function confirmPayment() {
   updatePayState();
 
   const now = new Date();
+  const items = buildOrderItems(state.cart.lines, t.promoLine);
+  const ticket = kitchenTicket(items);
+  const cust = state.cart.customer && state.cart.customer.phone ? state.cart.customer : null;
   const order = {
     id: nextOrderId(now),
+    queueNo: nextQueueNo(now),
     createdAtISO: isoLocal(now),
     createdAtUTC: now.toISOString(),
     createdAtTH: fmtDateTime(now),
     date: dateKey(now),
     device: state.settings.devicePrefix,
-    items: buildOrderItems(state.cart.lines),
+    staff: state.session ? { id: state.session.staffId, name: state.session.name } : null,
+    shiftId: state.shift ? state.shift.id : '',
+    note: state.cart.note || '',
+    items,
     subtotal: t.subtotal,
-    promos: t.promos,
+    promos: t.promos.map((p) => ({ key: p.key, label: p.label, bundles: p.bundles, discount: p.discount })),
     promoDiscount: t.promoDiscount,
     itemDiscount: t.itemDiscount,
+    pointsDiscount: t.pointsDiscount,
     manualDiscount: t.manualDiscount,
+    manualBy: t.manualDiscount ? (state.cart.discountBy || (state.session && state.session.name) || '') : '',
     totalDiscount: t.totalDiscount,
     net: t.net,
-    payment: { method: payCtx.method, label: PAY_METHODS[payCtx.method].label, cashReceived, change },
+    totalCost: round2(items.reduce((s, i) => s + i.cost, 0)),
+    customer: cust ? { phone: cust.phone, name: cust.name || (state.customers[cust.phone] && state.customers[cust.phone].name) || '', earned: t.pointsEarned, redeemed: t.pointsRedeemed } : null,
+    payment: { method: payCtx.method, label: pm ? pm.label : payCtx.method, kind: pm ? pm.kind : 'other', cashReceived, change },
     stockDeduction: cartNeeds(),
+    kitchenStatus: ticket.items.length ? 'PENDING' : 'NONE',
+    kitchen: ticket,
     status: 'COMPLETED',
     synced: false,
     voidedAtISO: '',
@@ -1408,7 +1768,7 @@ function confirmPayment() {
   };
 
   state.orders.push(order);
-  if (!save.orders()) {
+  if (!(await save.orders([order]))) {
     state.orders.pop();
     payCtx.busy = false;
     updatePayState();
@@ -1416,15 +1776,14 @@ function confirmPayment() {
   }
   for (const k in order.stockDeduction) state.stock[k] = Math.max(0, (state.stock[k] || 0) - order.stockDeduction[k]);
   save.stock();
+  if (order.customer) applyCustomerOrder(order, 1);
   enqueue('NEW_ORDER', order.id);
-  state.cart.lines = [];
-  state.cart.manualDiscount = '';
-  $('#manualDiscount').value = '';
-  save.cart();
+  resetCart();
 
   closeModal('m-pay');
   renderAll();
-  toast(`ชำระเงินสำเร็จ ${order.id}${change != null ? ` · เงินทอน ${money(change)}` : ''}`, 'success', 4000);
+  if (prefs().receipt.showDone) showOrderDone(order);
+  else toast(`ชำระเงินสำเร็จ คิว #${order.queueNo}${change != null ? ` · เงินทอน ${money(change)}` : ''}`, 'success', 4000);
   syncNow({ silent: true });
 }
 
@@ -1435,34 +1794,42 @@ function confirmPayment() {
 let histDate = todayKey();
 let histScope = 'local'; // 'local' | 'all'
 let histLoading = false;
+let histTab = 'bills'; // 'bills' | 'report' | 'shift'
 
-function openHistory() {
+function openHistory(tab) {
   histDate = todayKey();
+  if (tab) histTab = tab;
   renderHistory();
   openModal('m-history');
-  if (histScope === 'all') loadRemoteOrders();
+  if (histScope === 'all' && histTab === 'bills') loadRemoteOrders();
 }
 
 /** Sheet row → order-like object for display (read-only) */
 function normalizeRemoteOrder(r) {
   const label = r.Payment_Method || '';
+  const pm = state.catalog.payMethods.find((m) => m.id === r.Payment_Key) || state.catalog.payMethods.find((m) => m.label === label);
   return {
     id: String(r.Order_ID || ''),
     remote: true,
+    queueNo: String(r.Queue_No || ''),
     status: r.Status === 'VOIDED' ? 'VOIDED' : 'COMPLETED',
     date: String(r.Date || ''),
     createdAtTH: String(r.Date_Time || ''),
     createdAtISO: String(r.Timestamp_ISO || ''),
     itemsDetail: String(r.Items_Detail || ''),
+    note: String(r.Order_Note || ''),
     items: null,
     subtotal: num(r.Subtotal),
     promoDiscount: num(r.Promo_Discount),
     itemDiscount: num(r.Item_Discount),
+    pointsDiscount: num(r.Points_Discount),
     manualDiscount: num(r.Manual_Discount),
     totalDiscount: num(r.Total_Discount),
     net: num(r.Net_Total),
+    totalCost: num(r.Total_Cost),
+    staff: r.Staff ? { name: String(r.Staff) } : null,
     payment: {
-      method: r.Payment_Key || PAY_LABEL_TO_KEY[label] || 'cash',
+      method: r.Payment_Key || (pm ? pm.id : 'cash'),
       label,
       cashReceived: r.Cash_Received === '' || r.Cash_Received == null ? null : num(r.Cash_Received),
       change: r.Change === '' || r.Change == null ? null : num(r.Change),
@@ -1513,12 +1880,24 @@ function orderSyncPill(o) {
 
 function renderHistory() {
   const modal = $('#m-history');
+  const tabs = [['bills', 'ประวัติบิล', 'receipt'], ['report', 'วิเคราะห์ยอดขาย & กำไร', 'chart'], ['shift', 'กะ & ลิ้นชักเงินสด', 'cash']];
+  const head = `
+    <div class="mgr-tabs">
+      ${tabs.map(([id, label, ic]) => `<button class="mgr-tab ${histTab === id ? 'on' : ''}" data-htab="${id}" type="button">${svg(ic, 18)} ${label}</button>`).join('')}
+    </div>`;
+  if (histTab === 'report') return paint(modal.querySelector('.modal-body'), head + reportHTML());
+  if (histTab === 'shift') return paint(modal.querySelector('.modal-body'), head + shiftHistoryHTML());
+
   const orders = ordersForHistory().sort((a, b) => ((a.createdAtISO || '') < (b.createdAtISO || '') ? 1 : -1));
   const done = orders.filter((o) => o.status !== 'VOIDED');
   const voided = orders.length - done.length;
   const sum = (arr, f) => round2(arr.reduce((s, o) => s + f(o), 0));
-  const byMethod = (m) => sum(done.filter((o) => o.payment.method === m), (o) => o.net);
-  const countMethod = (m) => done.filter((o) => o.payment.method === m).length;
+  const methodIds = [...new Set(payMethods(false).map((m) => m.id).concat(done.map((o) => o.payment.method)))];
+  const methodStats = methodIds.map((id) => {
+    const list = done.filter((o) => o.payment.method === id);
+    const pm = payMethod(id);
+    return { id, label: pm ? pm.label : (list[0] && list[0].payment.label) || id, total: sum(list, (o) => o.net), n: list.length, active: pm ? pm.active : false };
+  }).filter((x) => x.n || x.active);
 
   const sold = {};
   let freeG = 0;
@@ -1533,27 +1912,32 @@ function renderHistory() {
 
   const rows = orders.map((o) => {
     const itemsHtml = o.items
-      ? o.items.map((i) => `<div><b>${esc(i.name)}</b> — ${esc(i.detail)}</div>`).join('')
+      ? o.items.map((i) => `<div><b>${esc(i.name)}</b> — ${esc(i.detail)}${i.note ? ` <span class="cl-note-inline">📝 ${esc(i.note)}</span>` : ''}</div>`).join('')
       : o.itemsDetail.split(' | ').map((s) => `<div>${esc(s)}</div>`).join('');
     const [d, t] = (o.createdAtTH || ' ').split(' ');
+    const otherDisc = round2((o.pointsDiscount || 0) + (o.manualDiscount || 0));
     return `
     <tr class="${o.status === 'VOIDED' ? 'voided' : ''}">
-      <td class="oid">${esc(o.id)}</td>
+      <td class="oid">${o.queueNo ? `<span class="qno">#${esc(o.queueNo)}</span>` : ''}${esc(o.id)}${o.staff && o.staff.name ? `<div class="help" style="margin:0">👤 ${esc(o.staff.name)}</div>` : ''}</td>
       <td class="nowrap">${esc(d)}<div class="help" style="margin:0">${esc(t || '')}</div></td>
-      <td class="items-cell">${itemsHtml}</td>
+      <td class="items-cell">${itemsHtml}${o.note ? `<div class="cl-note-inline">📝 ${esc(o.note)}</div>` : ''}${o.customer && o.customer.phone ? `<div class="help" style="margin:0">สมาชิก ${esc(o.customer.name || fmtPhone(o.customer.phone))}${o.customer.earned ? ` · +${o.customer.earned} แต้ม` : ''}</div>` : ''}</td>
       <td class="num strike">${money(o.subtotal)}</td>
       <td class="num strike">${negMoney(o.promoDiscount + o.itemDiscount)}${o.itemDiscount ? `<div class="help">รวมลดรายการ ${money(o.itemDiscount)}</div>` : ''}</td>
-      <td class="num strike">${negMoney(o.manualDiscount)}</td>
+      <td class="num strike">${negMoney(otherDisc)}${o.pointsDiscount ? `<div class="help">แต้ม ${money(o.pointsDiscount)}</div>` : ''}</td>
       <td class="num strike"><b>${money(o.net)}</b></td>
       <td>${esc(o.payment.label)}${o.payment.cashReceived != null ? `<div class="help">รับ ${money(o.payment.cashReceived)}<br/>ทอน ${money(o.payment.change)}</div>` : ''}</td>
       <td>${orderSyncPill(o)}</td>
       <td>${o.status === 'VOIDED'
         ? `<span class="pill pill-void">ยกเลิกบิล</span><div class="help">${esc(o.voidedAtTH)}${o.voidReason ? `<br/>${esc(o.voidReason)}` : ''}</div>`
-        : `<span class="pill pill-ok">ปกติ</span>${o.remote ? `<div class="help">ยกเลิกได้ที่เครื่อง ${esc(o.device)}</div>` : `<div style="margin-top:8px"><button class="btn btn-danger btn-sm" data-void="${esc(o.id)}" type="button">ยกเลิกบิล</button></div>`}`}</td>
+        : `<span class="pill pill-ok">ปกติ</span>${o.remote ? `<div class="help">ยกเลิกได้ที่เครื่อง ${esc(o.device)}</div>` : `
+          <div class="row" style="margin-top:8px;gap:6px">
+            <button class="btn btn-outline btn-sm" data-receipt="${esc(o.id)}" type="button">${svg('printer', 16)} ใบเสร็จ</button>
+            <button class="btn btn-danger btn-sm" data-void="${esc(o.id)}" type="button">${can('void') ? '' : '🔒 '}ยกเลิกบิล</button>
+          </div>`}`}</td>
     </tr>`;
   }).join('');
 
-  paint(modal.querySelector('.modal-body'), `
+  paint(modal.querySelector('.modal-body'), `${head}
     <div class="hist-toolbar">
       <button class="icon-btn" data-day="-1" type="button" aria-label="วันก่อนหน้า">${svg('left')}</button>
       <input class="input" id="histDate" type="date" value="${histDate}" max="${todayKey()}" />
@@ -1569,11 +1953,9 @@ function renderHistory() {
 
     <div class="stat-grid">
       <div class="stat primary span2"><div class="k">ยอดขายสุทธิรวม${histScope === 'all' ? ' (ทุกเครื่อง)' : ''}</div><div class="v">${money(sum(done, (o) => o.net))}</div><div class="s">${done.length} บิลสำเร็จ${voided ? ` · ยกเลิก ${voided} บิล` : ''}</div></div>
-      <div class="stat"><div class="k">เงินสด</div><div class="v">${money(byMethod('cash'))}</div><div class="s">${countMethod('cash')} บิล</div></div>
-      <div class="stat"><div class="k">สแกน QR</div><div class="v">${money(byMethod('qr'))}</div><div class="s">${countMethod('qr')} บิล</div></div>
-      <div class="stat"><div class="k">ไทยช่วยไทยพลัส</div><div class="v">${money(byMethod('tcp'))}</div><div class="s">${countMethod('tcp')} บิล</div></div>
+      ${methodStats.map((m) => `<div class="stat"><div class="k">${esc(m.label)}</div><div class="v">${money(m.total)}</div><div class="s">${m.n} บิล</div></div>`).join('')}
       <div class="stat"><div class="k">ส่วนลดรวมทั้งหมด</div><div class="v">${money(sum(done, (o) => o.totalDiscount))}</div>
-        <div class="s">โปร ${money(sum(done, (o) => o.promoDiscount))} · รายการ ${money(sum(done, (o) => o.itemDiscount))} · เพิ่มเติม ${money(sum(done, (o) => o.manualDiscount))}</div></div>
+        <div class="s">โปร ${money(sum(done, (o) => o.promoDiscount))} · รายการ ${money(sum(done, (o) => o.itemDiscount))} · แต้ม ${money(sum(done, (o) => o.pointsDiscount || 0))} · เพิ่มเติม ${money(sum(done, (o) => o.manualDiscount))}</div></div>
     </div>
 
     ${soldRows ? `
@@ -1586,8 +1968,8 @@ function renderHistory() {
       <div class="tbl-wrap">
         <table class="tbl">
           <thead><tr>
-            <th>Order_ID</th><th>วันที่/เวลา</th><th>รายการ</th><th class="num">ยอดรวม</th><th class="num">ส่วนลดโปร</th>
-            <th class="num">ส่วนลดเพิ่ม</th><th class="num">สุทธิ</th><th>ชำระโดย</th><th>Sync</th><th>สถานะ</th>
+            <th>คิว / Order_ID</th><th>วันที่/เวลา</th><th>รายการ</th><th class="num">ยอดรวม</th><th class="num">ส่วนลดโปร</th>
+            <th class="num">แต้ม/ลดเพิ่ม</th><th class="num">สุทธิ</th><th>ชำระโดย</th><th>Sync</th><th>สถานะ</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -1597,11 +1979,15 @@ function renderHistory() {
 async function voidOrder(orderId) {
   const o = state.orders.find((x) => x.id === orderId);
   if (!o || o.status === 'VOIDED') return;
+  const who = await requirePerm('void', 'ยกเลิกบิล');
+  if (!who) return;
   const restore = Object.keys(o.stockDeduction || {}).map((k) => `${poolName(k)} +${fmtNum(o.stockDeduction[k])} ${poolUnit(k)}`);
   const r = await confirmDialog({
-    title: `ยกเลิกบิล ${o.id}`,
+    title: `ยกเลิกบิล ${o.queueNo ? `คิว #${o.queueNo} · ` : ''}${o.id}`,
     html: `<p>ยอด <b>${money(o.net)}</b> (${esc(o.payment.label)}) จะถูกยกเลิกและไม่นับรวมในยอดขาย</p>
-           <p class="help">สต็อกที่จะคืนกลับ: ${esc(restore.join(', ') || '-')}</p>`,
+           <p class="help">สต็อกที่จะคืนกลับ: ${esc(restore.join(', ') || '-')}</p>
+           ${o.customer && o.customer.phone ? `<p class="help">แต้มสมาชิกจะถูกคืน/หักกลับ (${o.customer.earned ? `-${o.customer.earned}` : '0'} / ${o.customer.redeemed ? `+${o.customer.redeemed}` : '0'})</p>` : ''}
+           ${o.kitchenStatus === 'PENDING' ? '<p class="warn-box">ออเดอร์นี้ยังอยู่ในคิวหลังร้าน — จอ KDS จะแจ้งเตือนให้หยุดทำ</p>' : ''}`,
     okText: 'ยืนยันยกเลิกบิล',
     danger: true,
     input: { placeholder: 'เหตุผล (ไม่บังคับ)' },
@@ -1612,9 +1998,11 @@ async function voidOrder(orderId) {
   o.voidedAtISO = isoLocal(now);
   o.voidedAtTH = fmtDateTime(now);
   o.voidReason = r.value || '';
+  o.voidedBy = who.name || '';
   o.voidSynced = false;
   for (const k in o.stockDeduction || {}) state.stock[k] = (state.stock[k] || 0) + o.stockDeduction[k];
-  save.orders();
+  if (o.customer) applyCustomerOrder(o, -1);
+  save.orders([o]);
   save.stock();
   enqueue('VOID_ORDER', o.id);
   renderAll();
@@ -1643,7 +2031,8 @@ function commitCatalog() {
   renderAll();
 }
 
-function openManager(tab) {
+async function openManager(tab) {
+  if (!(await requirePerm('manage', 'จัดการเมนู & สต็อก'))) return;
   if (tab) mgr.tab = tab;
   renderManager();
   openModal('m-manage');
@@ -1655,12 +2044,15 @@ function renderManager() {
     ['cats', 'หมวดหมู่', 'folder', state.catalog.categories.length],
     ['promos', 'โปรโมชั่น', 'tag', state.catalog.promos.length],
     ['stock', 'สต็อก', 'box', state.catalog.pools.length],
+    ['log', 'ประวัติสต็อก', 'list', ''],
+    ['shop', 'ตัวเลือกร้าน', 'sliders', ''],
   ];
   const body = $('#m-manage .modal-body');
-  const content = mgr.tab === 'cats' ? mgrCatsHTML() : mgr.tab === 'promos' ? mgrPromosHTML() : mgr.tab === 'stock' ? mgrStockHTML() : mgrMenuHTML();
+  const views = { cats: mgrCatsHTML, promos: mgrPromosHTML, stock: mgrStockHTML, log: mgrStockLogHTML, shop: mgrShopHTML };
+  const content = (views[mgr.tab] || mgrMenuHTML)();
   paint(body, `
     <div class="mgr-tabs">
-      ${tabs.map(([id, label, ic, n]) => `<button class="mgr-tab ${mgr.tab === id ? 'on' : ''}" data-mtab="${id}" type="button">${svg(ic, 18)} ${label}<span class="cnt">${n}</span></button>`).join('')}
+      ${tabs.map(([id, label, ic, n]) => `<button class="mgr-tab ${mgr.tab === id ? 'on' : ''}" data-mtab="${id}" type="button">${svg(ic, 18)} ${label}${n === '' ? '' : `<span class="cnt">${n}</span>`}</button>`).join('')}
     </div>
     <div class="mgr-content">${content}</div>`);
   $('#m-manage .foot-note').textContent = (state.settings.gasUrl || '').trim() && state.settings.autoPush
@@ -1674,8 +2066,9 @@ function itemMetaText(it) {
   if (it.mode === 'unit') parts.push(money(it.price));
   if (it.mode === 'weight') parts.push(`${money(it.pricePerGram)}/กรัม · ขั้นต่ำ ${it.minGrams} ก.`);
   if (it.mode === 'set') parts.push(`${money(it.price)} · ${it.optionGroups.length} กลุ่มตัวเลือก`);
-  const p = effectivePromo(it);
-  if (p) parts.push(p.name);
+  const ps = state.catalog.promos.filter((p) => p.active && promoTouches(p, it));
+  if (ps.length) parts.push(`โปร: ${ps.map((p) => p.name).join(', ')}`);
+  if (it.cost) parts.push(`ต้นทุนเพิ่ม ${money(it.cost)}`);
   return parts.join(' · ');
 }
 function itemStockText(it) {
@@ -1735,14 +2128,10 @@ function setAvailability(id, v) {
 }
 
 /* ---------- Categories tab ---------- */
-function promoOptions(selected) {
-  return `<option value="" ${!selected ? 'selected' : ''}>— ไม่มีโปรของหมวด —</option>
-    ${state.catalog.promos.map((p) => `<option value="${esc(p.id)}" ${selected === p.id ? 'selected' : ''}>${esc(p.name)}${p.active ? '' : ' (ปิดอยู่)'}</option>`).join('')}`;
-}
 function mgrCatsHTML() {
   const cats = state.catalog.categories;
   return `
-    <p class="help" style="margin:0 0 12px">ลำดับหมวดหมู่ = ลำดับแท็บบนหน้าขาย · โปรของหมวดใช้กับทุกเมนู “ขายเป็นชิ้น” ในหมวด (เว้นแต่เมนูนั้นตั้งโปรเอง)</p>
+    <p class="help" style="margin:0 0 12px">ลำดับหมวดหมู่ = ลำดับแท็บบนหน้าขาย · “ส่งเข้าครัว” = รายการในหมวดนี้จะขึ้นจอจัดออเดอร์ (KDS) · ตั้งโปรของหมวดได้ที่แท็บ “โปรโมชั่น”</p>
     ${cats.map((c, i) => {
       const n = state.catalog.items.filter((it) => it.categoryId === c.id).length;
       return `
@@ -1755,8 +2144,7 @@ function mgrCatsHTML() {
           <input class="input" data-catname="${esc(c.id)}" type="text" value="${esc(c.name)}" />
           <div class="help">${n} เมนู</div>
         </div>
-        <label class="mgr-field"><span class="help">โปรของหมวด</span>
-          <select class="input" data-catpromo="${esc(c.id)}">${promoOptions(c.promoId)}</select></label>
+        <button class="btn ${c.kitchen ? 'btn-outline' : 'btn-ghost'}" data-act="cat-kitchen" data-id="${esc(c.id)}" type="button">${c.kitchen ? '🍳 ส่งเข้าครัว' : 'ไม่ส่งเข้าครัว'}</button>
         <button class="btn ${c.hidden ? 'btn-outline' : 'btn-ghost'}" data-act="cat-toggle" data-id="${esc(c.id)}" type="button">${svg(c.hidden ? 'eyeoff' : 'eye', 18)} ${c.hidden ? 'ซ่อนอยู่' : 'แสดง'}</button>
         <button class="icon-btn danger" data-act="cat-del" data-id="${esc(c.id)}" type="button" aria-label="ลบหมวด">${svg('trash')}</button>
       </div>`;
@@ -1773,7 +2161,7 @@ async function catAction(act, id) {
   if (act === 'cat-add') {
     const name = ($('#newCatName').value || '').trim();
     if (!name) return toast('กรุณาใส่ชื่อหมวดหมู่', 'warn');
-    cats.push({ id: `c_${uid()}`, name, hidden: false, promoId: '' });
+    cats.push({ id: `c_${uid()}`, name, hidden: false, kitchen: true });
   } else if (i < 0) {
     return;
   } else if (act === 'cat-up' && i > 0) {
@@ -1782,6 +2170,8 @@ async function catAction(act, id) {
     [cats[i + 1], cats[i]] = [cats[i], cats[i + 1]];
   } else if (act === 'cat-toggle') {
     cats[i].hidden = !cats[i].hidden;
+  } else if (act === 'cat-kitchen') {
+    cats[i].kitchen = !cats[i].kitchen;
   } else if (act === 'cat-del') {
     const n = state.catalog.items.filter((it) => it.categoryId === id).length;
     if (n) return toast(`ย้ายหรือลบเมนูในหมวดนี้ก่อน (${n} เมนู)`, 'warn', 3500);
@@ -1789,78 +2179,6 @@ async function catAction(act, id) {
     const r = await confirmDialog({ title: 'ลบหมวดหมู่', html: `ลบหมวด <b>${esc(cats[i].name)}</b> ?`, okText: 'ลบ', danger: true });
     if (!r.ok) return;
     cats.splice(i, 1);
-  }
-  commitCatalog();
-  renderManager();
-}
-
-/* ---------- Promotions tab ---------- */
-function promoMembers(pid) {
-  return state.catalog.items.filter((it) => { const p = effectivePromo(it); return p && p.id === pid; });
-}
-function mgrPromosHTML() {
-  const unitItems = state.catalog.items.filter((it) => it.mode === 'unit');
-  return `
-    <p class="help" style="margin:0 0 12px">โปรคละได้ (Mix &amp; Match): ครบ X ชิ้นจากเมนูที่เลือก = Y บาท · ระบบจับชุดจากชิ้นที่ราคาสูงสุดก่อน · ใช้ได้กับเมนู “ขายเป็นชิ้น”</p>
-    ${state.catalog.promos.map((p) => {
-      const members = new Set(state.catalog.items.filter((it) => {
-        if (it.mode !== 'unit' || it.promoId === 'none') return false;
-        const pid = it.promoId || (IDX.cat[it.categoryId] ? IDX.cat[it.categoryId].promoId : '');
-        return pid === p.id;
-      }).map((x) => x.id));
-      const prices = [...members].map((id) => IDX.item[id].price);
-      const sample = prices.length ? Math.max(...prices) * p.size : 0;
-      return `
-      <div class="promo-card ${p.active ? '' : 'is-off'}">
-        <div class="promo-head">
-          <input class="input grow" data-promo="${esc(p.id)}" data-f="name" type="text" value="${esc(p.name)}" />
-          <button class="btn ${p.active ? 'btn-ok' : 'btn-ghost'}" data-act="promo-toggle" data-id="${esc(p.id)}" type="button">${p.active ? 'เปิดใช้งาน' : 'ปิดอยู่'}</button>
-          <button class="icon-btn danger" data-act="promo-del" data-id="${esc(p.id)}" type="button" aria-label="ลบโปร">${svg('trash')}</button>
-        </div>
-        <div class="promo-rule">
-          <span>ครบ</span><input class="input num-in" data-promo="${esc(p.id)}" data-f="size" type="number" inputmode="numeric" min="2" value="${p.size}" /><span>ชิ้น</span>
-          <span>ราคา</span><input class="input num-in" data-promo="${esc(p.id)}" data-f="price" type="number" inputmode="decimal" min="0" value="${p.price}" /><span>บาท</span>
-          ${sample ? `<span class="help">ตัวอย่าง: ปกติ ${money(sample)} → ${money(p.price)} (ลด ${money(Math.max(0, sample - p.price))}/ชุด)</span>` : ''}
-        </div>
-        <div class="help" style="margin:8px 0 4px">เมนูที่ร่วมโปรนี้ (${members.size})</div>
-        <div class="member-grid">
-          ${unitItems.map((it) => `
-            <label class="member ${members.has(it.id) ? 'on' : ''}">
-              <input type="checkbox" data-member="${esc(p.id)}" data-item="${esc(it.id)}" ${members.has(it.id) ? 'checked' : ''} />
-              <span>${esc(it.name)} <small>${money(it.price)}</small></span>
-            </label>`).join('')}
-        </div>
-      </div>`;
-    }).join('') || '<div class="empty-state">ยังไม่มีโปรโมชั่น</div>'}
-    <div class="mgr-add"><button class="btn btn-primary" data-act="promo-add" type="button">${svg('plus', 18)} เพิ่มโปรโมชั่นคละได้</button></div>`;
-}
-
-function togglePromoMember(pid, itemId, on) {
-  const it = IDX.item[itemId];
-  if (!it) return;
-  const cat = IDX.cat[it.categoryId];
-  const catPid = cat ? cat.promoId : '';
-  if (on) it.promoId = catPid === pid ? '' : pid;
-  else it.promoId = catPid === pid ? 'none' : '';
-  commitCatalog();
-  renderManager();
-}
-
-async function promoAction(act, id) {
-  const promos = state.catalog.promos;
-  if (act === 'promo-add') {
-    promos.push({ id: `p_${uid()}`, name: 'โปรใหม่ 2 ชิ้น', size: 2, price: 0, active: true });
-  } else if (act === 'promo-toggle') {
-    const p = IDX.promo[id];
-    if (p) p.active = !p.active;
-  } else if (act === 'promo-del') {
-    const p = IDX.promo[id];
-    if (!p) return;
-    const r = await confirmDialog({ title: 'ลบโปรโมชั่น', html: `ลบ <b>${esc(p.name)}</b> ? เมนูที่ผูกไว้จะไม่ร่วมโปรนี้อีก`, okText: 'ลบ', danger: true });
-    if (!r.ok) return;
-    state.catalog.promos = promos.filter((x) => x.id !== id);
-    state.catalog.categories.forEach((c) => { if (c.promoId === id) c.promoId = ''; });
-    state.catalog.items.forEach((it) => { if (it.promoId === id) it.promoId = ''; });
   }
   commitCatalog();
   renderManager();
@@ -1879,6 +2197,7 @@ function mgrStockHTML() {
   }).filter((g) => g.pools.length);
   const orphans = state.catalog.pools.map((p) => p.id).filter((id) => !seen.has(id));
   if (orphans.length) groups.push({ title: 'Stock Pool ที่ยังไม่ผูกกับเมนู', pools: orphans });
+  const locked = !can('stock');
 
   const row = (id) => {
     const p = IDX.pool[id];
@@ -1886,40 +2205,56 @@ function mgrStockHTML() {
     const quick = p.unit === 'g' ? [[-100, '-100g'], [100, '+100g'], [500, '+500g']] : [[-1, '-1'], [5, '+5'], [10, '+10']];
     const thumbId = refs.length && refs[0].stockPool === id ? refs[0].id : '';
     const img = thumbId && state.images[thumbId];
+    const low = refs.some((it) => it.mode !== 'set' && it.stockPool === id && (state.stock[id] || 0) <= lowPoint(it));
     return `
-      <div class="stock-row" data-row="${esc(id)}">
+      <div class="stock-row ${low ? 'is-low' : ''}" data-row="${esc(id)}">
         <div class="stock-thumb ${img ? '' : 'none'}">${img ? `<img src="${img}" alt="" />` : svg('box', 26)}</div>
         <div>
-          <input class="input pool-name" data-poolname="${esc(id)}" type="text" value="${esc(p.name)}" />
-          <div class="stock-meta">หน่วย: ${UNIT_LABEL[p.unit]} · ใช้กับ: ${refs.length ? esc(refs.map((r) => r.name).join(', ')) : '—'}</div>
+          <input class="input pool-name" data-poolname="${esc(id)}" type="text" value="${esc(p.name)}" ${locked ? 'readonly' : ''} />
+          <div class="stock-meta">หน่วย: ${esc(unitLabel(p.unit))} · ใช้กับ: ${refs.length ? esc(refs.map((r) => r.name).join(', ')) : '—'}${low ? ' · <b style="color:var(--warn)">ใกล้หมด</b>' : ''}</div>
+          <label class="stock-meta cost-in">ต้นทุน ฿<input class="input" data-poolcost="${esc(id)}" type="number" inputmode="decimal" min="0" step="0.01" value="${p.cost || ''}" placeholder="0" ${locked ? 'readonly' : ''} /> / ${esc(unitLabel(p.unit))}</label>
         </div>
         <div class="stock-input-wrap">
-          <input class="stock-input ${state.stock[id] <= 0 ? 'zero' : ''}" data-stock="${esc(id)}" type="number" inputmode="numeric" min="0" step="1" value="${state.stock[id] || 0}" />
-          <span class="stock-unit">${UNIT_LABEL[p.unit]}</span>
+          <input class="stock-input ${state.stock[id] <= 0 ? 'zero' : ''}" data-stock="${esc(id)}" type="number" inputmode="numeric" min="0" step="1" value="${state.stock[id] || 0}" ${locked ? 'readonly' : ''} />
+          <span class="stock-unit">${esc(unitLabel(p.unit))}</span>
         </div>
         <div class="quick-add">
           ${quick.map(([n, label]) => `<button class="${n < 0 ? 'minus' : ''}" data-quick="${esc(id)}" data-n="${n}" type="button">${label}</button>`).join('')}
+          <button class="adj" data-act="pool-adjust" data-id="${esc(id)}" type="button">ปรับ / ของเสีย</button>
           ${refs.length ? '' : `<button class="minus" data-act="pool-del" data-id="${esc(id)}" type="button" aria-label="ลบ">${svg('trash', 18)}</button>`}
         </div>
       </div>`;
   };
   return `
+    ${locked ? '<div class="warn-box" style="margin:0 0 12px">🔒 การปรับสต็อกต้องใช้ PIN เจ้าของร้าน — กดปุ่มปรับแล้วระบบจะขอ PIN</div>' : ''}
+    <p class="help" style="margin:0 0 12px">ทุกการปรับสต็อกถูกบันทึกในแท็บ “ประวัติสต็อก” พร้อมเหตุผล (เติมสต็อก / ของเสีย / แจกฟรี …) และส่งขึ้นชีต Stock_Log · ใส่ต้นทุนต่อหน่วยเพื่อดูกำไรในหน้ารายงาน</p>
     ${groups.map((g) => `<div class="stock-group"><h3>${esc(g.title)}</h3>${g.pools.map(row).join('')}</div>`).join('')}
     <div class="stock-group">
       <h3>เพิ่ม Stock Pool ใช้ร่วม <small>เช่น วัตถุดิบที่หลายเมนูใช้ร่วมกัน (ไอศกรีม, คุกกี้ในเซ็ต)</small></h3>
       <div class="mgr-add">
         <input class="input grow" id="newPoolName" type="text" placeholder="ชื่อ Stock Pool เช่น ไอศกรีมช็อกโกแลต" />
-        <select class="input" id="newPoolUnit" style="width:140px">${Object.keys(UNIT_LABEL).map((u) => `<option value="${u}">${UNIT_LABEL[u]}</option>`).join('')}</select>
+        <select class="input" id="newPoolUnit" style="width:140px">${state.catalog.units.map((u) => `<option value="${esc(u.id)}">${esc(u.label)}</option>`).join('')}</select>
         <button class="btn btn-primary" data-act="pool-add" type="button">${svg('plus', 18)} เพิ่ม</button>
       </div>
     </div>`;
 }
 
-function setStock(key, value, flash = true) {
+/**
+ * Change a stock pool and write a stock-log entry.
+ * reason: id from catalog.stockReasons ('count' = set exact amount). Requires the "stock" permission.
+ */
+async function setStock(key, value, { flash = true, reason = 'count', note = '' } = {}) {
+  const who = await requirePerm('stock', 'ปรับสต็อก');
+  const row = $$('#m-manage [data-row]').find((r) => r.dataset.row === key);
+  if (!who) {
+    if (row) row.querySelector('.stock-input').value = state.stock[key] || 0;
+    return false;
+  }
+  const before = state.stock[key] || 0;
   state.stock[key] = toInt(value);
   save.stock();
   markDirty('stock', key);
-  const row = $$('#m-manage [data-row]').find((r) => r.dataset.row === key);
+  if (state.stock[key] !== before) logStock(key, before, state.stock[key], reason, note, who);
   if (row) {
     const input = row.querySelector('.stock-input');
     if (document.activeElement !== input) input.value = state.stock[key];
@@ -1928,14 +2263,16 @@ function setStock(key, value, flash = true) {
   }
   renderMenu();
   renderCart();
+  return true;
 }
 
 async function poolAction(act, id) {
+  if (act === 'pool-adjust') return openStockAdjust(id);
   if (act === 'pool-add') {
     const name = ($('#newPoolName').value || '').trim();
     if (!name) return toast('กรุณาใส่ชื่อ Stock Pool', 'warn');
     const pid = `pool_${uid()}`;
-    state.catalog.pools.push({ id: pid, name, unit: $('#newPoolUnit').value || 'pcs' });
+    state.catalog.pools.push({ id: pid, name, unit: $('#newPoolUnit').value || 'pcs', cost: 0 });
     state.stock[pid] = 0;
   } else if (act === 'pool-del') {
     if (poolRefs(id).length) return toast('Pool นี้ยังถูกใช้อยู่', 'warn');
@@ -1968,15 +2305,14 @@ function openItemEditor(id) {
 function poolSelect(path, value) {
   return `<select class="input" data-bind="${path}">
     <option value="" ${!value ? 'selected' : ''}>— ไม่ตัดสต็อก —</option>
-    ${state.catalog.pools.map((p) => `<option value="${esc(p.id)}" ${value === p.id ? 'selected' : ''}>${esc(p.name)} (${UNIT_LABEL[p.unit]})</option>`).join('')}
+    ${state.catalog.pools.map((p) => `<option value="${esc(p.id)}" ${value === p.id ? 'selected' : ''}>${esc(p.name)} (${esc(unitLabel(p.unit))})</option>`).join('')}
   </select>`;
 }
 
 function renderItemEditor() {
   const d = ed.draft;
   const img = ed.image !== undefined ? ed.image : state.images[d.id];
-  const cat = IDX.cat[d.categoryId];
-  const catPromo = cat && IDX.promo[cat.promoId];
+  const promosHere = state.catalog.promos.filter((p) => promoTouches(p, d));
   const isUnitPool = (p) => p.unit !== 'g' && p.id !== d.id;
   const isGramPool = (p) => p.unit === 'g' && p.id !== d.id;
   const ownExists = !ed.isNew && IDX.pool[d.id];
@@ -1986,7 +2322,7 @@ function renderItemEditor() {
       <option value="__own__" ${d._bind === '__own__' ? 'selected' : ''}>${esc(ownLabel)}</option>
       <option value="" ${d._bind === '' ? 'selected' : ''}>— ไม่ตัดสต็อก (ขายได้ไม่จำกัด) —</option>
       <optgroup label="ใช้ Stock Pool ร่วม">
-        ${state.catalog.pools.filter(filter).map((p) => `<option value="${esc(p.id)}" ${d._bind === p.id ? 'selected' : ''}>${esc(p.name)} (${UNIT_LABEL[p.unit]})</option>`).join('')}
+        ${state.catalog.pools.filter(filter).map((p) => `<option value="${esc(p.id)}" ${d._bind === p.id ? 'selected' : ''}>${esc(p.name)} (${esc(unitLabel(p.unit))})</option>`).join('')}
       </optgroup>
     </select>`;
 
@@ -1997,12 +2333,7 @@ function renderItemEditor() {
         <label class="ed-field"><span>ราคาต่อชิ้น (บาท)</span><input class="input" data-bind="price" type="number" inputmode="decimal" min="0" value="${esc(d.price)}" /></label>
         <label class="ed-field"><span>การผูกสต็อก</span>${bindSelect(isUnitPool)}</label>
       </div>
-      <label class="ed-field"><span>โปรโมชั่นคละได้</span>
-        <select class="input" data-bind="promoId">
-          <option value="" ${!d.promoId ? 'selected' : ''}>ตามหมวดหมู่${catPromo ? ` (${esc(catPromo.name)})` : ' (ไม่มี)'}</option>
-          <option value="none" ${d.promoId === 'none' ? 'selected' : ''}>ไม่ร่วมโปรโมชั่น</option>
-          ${state.catalog.promos.map((p) => `<option value="${esc(p.id)}" ${d.promoId === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
-        </select></label>`;
+`;
   } else if (d.mode === 'weight') {
     modeHtml = `
       <div class="ed-row">
@@ -2081,6 +2412,13 @@ function renderItemEditor() {
           ${Object.keys(MODES).map((k) => `<button class="mode-card ${d.mode === k ? 'on' : ''}" data-ed="mode" data-v="${k}" type="button"><b>${MODES[k].label}</b><small>${MODES[k].en}</small></button>`).join('')}
         </div>
         ${modeHtml}
+        <div class="ed-row">
+          <label class="ed-field"><span>ต้นทุนเพิ่มต่อ${d.mode === 'set' ? 'เซ็ต' : d.mode === 'weight' ? 'รายการ' : 'ชิ้น'} (กล่อง/ถุง ฯลฯ)</span><input class="input" data-bind="cost" type="number" inputmode="decimal" min="0" step="0.01" value="${esc(d.cost || '')}" placeholder="0" /></label>
+          <label class="ed-field"><span>แจ้งเตือนใกล้หมดเมื่อเหลือ ≤ (${d.mode === 'set' ? 'เซ็ต' : d.mode === 'weight' ? 'กรัม' : 'ชิ้น'})</span><input class="input" data-bind="lowAt" type="number" inputmode="numeric" min="0" value="${esc(d.lowAt)}" placeholder="ค่าเริ่มต้นร้าน: ${prefs().lowDefaults[d.mode]}" /></label>
+        </div>
+        <p class="help" style="margin-top:-6px">ต้นทุนวัตถุดิบตั้งที่แท็บ “สต็อก” (ต่อหน่วยของ Stock Pool) — ต้นทุนรวม = วัตถุดิบที่ตัด + ต้นทุนเพิ่มนี้</p>
+        <div class="ed-sub-title">โปรโมชั่นที่ใช้กับเมนูนี้</div>
+        <div class="help" style="margin:0 0 10px">${promosHere.length ? promosHere.map((p) => `• ${esc(p.name)}${p.active ? '' : ' (ปิดอยู่)'}`).join('<br/>') : 'ยังไม่มี'} — ตั้ง/แก้ได้ที่แท็บ “โปรโมชั่น”</div>
       </div>
     </div>`);
   modal.querySelector('.modal-foot').innerHTML = `
@@ -2131,7 +2469,7 @@ async function newCategoryFromEditor() {
   if (!name) return toast('กรุณาใส่ชื่อหมวดหมู่', 'warn');
   const existing = state.catalog.categories.find((c) => c.name === name);
   const id = existing ? existing.id : `c_${uid()}`;
-  if (!existing) state.catalog.categories.push({ id, name, hidden: false, promoId: '' });
+  if (!existing) state.catalog.categories.push({ id, name, hidden: false, kitchen: true });
   ed.draft.categoryId = id;
   commitCatalog();
   renderItemEditor();
@@ -2160,7 +2498,6 @@ async function saveItemEditor() {
     const own = IDX.pool[d.id];
     if (own) { own.name = d.name; own.unit = unit; } else state.catalog.pools.push({ id: d.id, name: d.name, unit });
   } else d.stockPool = bind || '';
-  if (d.mode !== 'unit' && d.promoId !== 'none') d.promoId = '';
 
   const item = normalizeItem(d);
   const items = state.catalog.items;
@@ -2230,8 +2567,11 @@ async function onImagePicked(file) {
    16. GOOGLE SHEETS — ORDER QUEUE
    ========================================================================== */
 
-function enqueue(action, orderId) {
-  state.queue.push({ qid: uid(), action, orderId, createdAt: isoLocal(new Date()), attempts: 0, lastError: '' });
+/** Queue a write for Google Sheets. Order actions reference the order; others carry their own payload. */
+function enqueue(action, orderId, payload, label) {
+  const q = { qid: uid(), action, orderId: orderId || '', createdAt: isoLocal(new Date()), attempts: 0, lastError: '' };
+  if (payload) { q.payload = payload; q.label = label || action; }
+  state.queue.push(q);
   save.queue();
   renderHeader();
 }
@@ -2260,7 +2600,21 @@ function orderSyncData(o) {
     device: o.device,
     voidedAt: o.voidedAtTH || '',
     voidReason: o.voidReason || '',
+    voidedBy: o.voidedBy || '',
     stockDeduction: o.stockDeduction || {},
+    queueNo: o.queueNo || '',
+    orderNote: o.note || '',
+    kitchenStatus: o.kitchenStatus || 'NONE',
+    kitchenItems: o.kitchen ? JSON.stringify({ q: o.queueNo || '', t: o.createdAtISO, note: o.note || '', staff: o.staff ? o.staff.name : '', items: o.kitchen.items, prep: o.kitchen.prep }) : '',
+    staff: o.staff ? o.staff.name : '',
+    customerPhone: o.customer ? o.customer.phone : '',
+    customerName: o.customer ? o.customer.name : '',
+    pointsEarned: o.customer ? o.customer.earned || 0 : 0,
+    pointsRedeemed: o.customer ? o.customer.redeemed || 0 : 0,
+    pointsDiscount: o.pointsDiscount || 0,
+    totalCost: o.totalCost || 0,
+    shiftId: o.shiftId || '',
+    manualBy: o.manualBy || '',
     items: o.items.map((i) => ({
       lineNo: i.lineNo,
       category: i.category,
@@ -2276,11 +2630,15 @@ function orderSyncData(o) {
       gross: i.gross,
       itemDiscount: i.itemDiscount,
       lineNet: i.net,
+      lineNote: i.note || '',
+      promoDiscount: i.promoDiscount || 0,
+      cost: i.cost || 0,
     })),
   };
 }
 
 function buildAction(q) {
+  if (q.payload) return { qid: q.qid, action: q.action, orderId: q.orderId || q.label || q.action, data: q.payload };
   const o = state.orders.find((x) => x.id === q.orderId);
   if (!o) return null;
   if (q.action === 'NEW_ORDER') return { qid: q.qid, action: 'NEW_ORDER', orderId: o.id, data: orderSyncData(o) };
@@ -2296,6 +2654,70 @@ function fetchWithTimeout(url, opts, ms) {
   return fetch(url, Object.assign({}, opts, ctrl ? { signal: ctrl.signal } : {})).finally(() => timer && clearTimeout(timer));
 }
 
+/* ---------- Cloud endpoint: Cloudflare /api/sync (behind Access login) or Apps Script directly ---------- */
+
+const isProxyUrl = (url) => { try { return new URL(url, location.href).origin === location.origin; } catch (e) { return false; } };
+
+class AuthExpiredError extends Error {
+  constructor() {
+    super('เซสชันเข้าสู่ระบบหมดอายุ — กด “รีเฟรชเพื่อ Login ใหม่”');
+    this.name = 'AuthExpiredError';
+    this.auth = true;
+  }
+}
+
+/**
+ * fetch() for the sync endpoint. For the same-origin proxy, redirects are NOT followed: when the
+ * Cloudflare Access session has expired, Access answers with a redirect to its login page
+ * (→ "opaqueredirect") or a 401/403 page — both mean “log in again”, never “offline”.
+ */
+async function cloudFetch(url, opts, ms) {
+  const proxy = isProxyUrl(url);
+  const res = await fetchWithTimeout(url, Object.assign({}, opts, proxy
+    ? { redirect: 'manual', credentials: 'same-origin', cache: 'no-store' }
+    : { redirect: 'follow' }), ms);
+  if (!proxy) return res;
+  if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) { setAuthExpired(true); throw new AuthExpiredError(); }
+  const ct = res.headers.get('content-type') || '';
+  if (res.status === 401 || res.status === 403 || ct.includes('text/html')) {
+    let j = null;
+    try { j = JSON.parse(await res.clone().text()); } catch (e) { /* Access HTML page */ }
+    if (!j || j.code === 'AUTH_EXPIRED') { setAuthExpired(true); throw new AuthExpiredError(); }
+    setAuthExpired(false);
+    throw new Error(j.error || `HTTP ${res.status}`); // our own JSON error = configuration problem, not the session
+  }
+  setAuthExpired(false);
+  return res;
+}
+
+/** Persistent red banner — the sale screen keeps working, only the cloud is paused. */
+function setAuthExpired(on) {
+  on = !!on;
+  const was = !!state.authExpired;
+  state.authExpired = on;
+  let b = document.getElementById('authBanner');
+  if (!on) { if (b) b.remove(); return; }
+  if (!b) {
+    b = document.createElement('div');
+    b.id = 'authBanner';
+    b.setAttribute('role', 'alert');
+    document.body.appendChild(b);
+    b.addEventListener('click', (e) => { if (e.target.closest('[data-auth="reload"]')) location.reload(); });
+  }
+  renderAuthBanner();
+  if (!was) toast('🔒 เซสชันเข้าสู่ระบบหมดอายุ — กดปุ่มสีแดงด้านบนเพื่อ Login ใหม่', 'error', 7000);
+}
+function renderAuthBanner() {
+  const b = document.getElementById('authBanner');
+  if (!b) return;
+  const n = state.queue.length;
+  b.innerHTML = `
+    <div class="ab-ic">🔒</div>
+    <div class="ab-text"><b>เซสชันเข้าสู่ระบบหมดอายุ — ข้อมูลยังไม่ถูกส่งขึ้น Google Sheets</b>
+      <span>ขายต่อได้ตามปกติ บิล${n ? ` ${n} รายการที่ค้างอยู่` : ''}และตะกร้าเก็บในเครื่องครบ ไม่หาย · กดรีเฟรชแล้วกรอกอีเมล + รหัส OTP เพื่อเข้าสู่ระบบใหม่ ระบบจะส่งข้อมูลที่ค้างให้อัตโนมัติ</span></div>
+    <button class="btn btn-lg ab-btn" data-auth="reload" type="button">${svg('refresh', 20)} รีเฟรชเพื่อ Login ใหม่</button>`;
+}
+
 /**
  * POST as text/plain (a "simple" request → no CORS preflight). Apps Script replies with
  * Access-Control-Allow-Origin:* so the JSON is normally readable. If it isn't (and the
@@ -2305,21 +2727,24 @@ function fetchWithTimeout(url, opts, ms) {
 async function postToSheet(url, bodyObj, { needResponse = false, timeout = 30000 } = {}) {
   const body = JSON.stringify(bodyObj);
   const headers = { 'Content-Type': 'text/plain;charset=utf-8' };
+  const proxy = isProxyUrl(url);
   let res;
   try {
-    res = await fetchWithTimeout(url, { method: 'POST', headers, body, redirect: 'follow' }, timeout);
+    res = await cloudFetch(url, { method: 'POST', headers, body }, timeout);
   } catch (err) {
+    if (err && err.auth) throw err; // session expired → keep everything queued
     if (err && err.name === 'AbortError') throw new Error('หมดเวลาเชื่อมต่อ (timeout)');
-    if (needResponse) throw new Error('อ่านข้อมูลจาก Cloud ไม่ได้ — ตรวจสอบอินเทอร์เน็ตและการ Deploy');
+    if (proxy || needResponse) throw new Error(err && err.message && !/fetch|network|load failed/i.test(err.message) ? err.message : 'เชื่อมต่อ Cloud ไม่ได้ — ตรวจสอบอินเทอร์เน็ต');
+    // legacy direct Apps Script only (CORS quirk): fire-and-forget, every write is idempotent on the server
     await fetchWithTimeout(url, { method: 'POST', mode: 'no-cors', headers, body }, timeout);
     return { opaque: true };
   }
   const text = await res.text();
   let json;
   try { json = JSON.parse(text); } catch (e) {
-    throw new Error(`Apps Script ตอบกลับไม่ใช่ JSON (HTTP ${res.status}) — ตรวจสอบว่า Deploy แบบ "Anyone" แล้ว`);
+    throw new Error(proxy ? `Cloud ตอบกลับไม่ถูกต้อง (HTTP ${res.status})` : `Apps Script ตอบกลับไม่ใช่ JSON (HTTP ${res.status}) — ตรวจสอบว่า Deploy แบบ "Anyone" แล้ว`);
   }
-  if (!json.ok) throw new Error(json.error || 'Apps Script error');
+  if (!json.ok) throw new Error(json.code === 'BAD_KEY' ? 'รหัสลับไม่ตรงกัน (SYNC_SECRET ใน Cloudflare ≠ Apps Script)' : json.error || 'Apps Script error');
   return json;
 }
 
@@ -2338,7 +2763,7 @@ async function syncNow({ silent = false } = {}) {
   refreshSettingsIfOpen();
   let okCount = 0, failCount = 0, lastError = '';
   try {
-    state.queue = state.queue.filter((q) => state.orders.some((o) => o.id === q.orderId));
+    state.queue = state.queue.filter((q) => q.payload || state.orders.some((o) => o.id === q.orderId));
     const snapshot = state.queue.slice();
     for (let i = 0; i < snapshot.length; i += 20) {
       const batch = snapshot.slice(i, i + 20);
@@ -2353,11 +2778,12 @@ async function syncNow({ silent = false } = {}) {
         lastError = err.message || String(err);
         batch.forEach((q) => { errors[q.qid] = lastError; });
       }
+      const touched = [];
       for (const q of batch) {
         if (doneIds.includes(q.qid)) {
           okCount++;
-          const o = state.orders.find((x) => x.id === q.orderId);
-          if (o) { if (q.action === 'NEW_ORDER') o.synced = true; else o.voidSynced = true; }
+          const o = !q.payload && state.orders.find((x) => x.id === q.orderId);
+          if (o) { if (q.action === 'NEW_ORDER') o.synced = true; else o.voidSynced = true; touched.push(o); }
         } else {
           failCount++;
           const live = state.queue.find((x) => x.qid === q.qid);
@@ -2366,7 +2792,7 @@ async function syncNow({ silent = false } = {}) {
       }
       state.queue = state.queue.filter((q) => !doneIds.includes(q.qid));
       save.queue();
-      save.orders();
+      if (touched.length) save.orders(touched);
       if (lastError && !doneIds.length) break;
     }
   } finally {
@@ -2379,7 +2805,7 @@ async function syncNow({ silent = false } = {}) {
     if (isOpen('m-history')) renderHistory();
   }
   if (!silent || failCount) {
-    if (failCount) toast(`Sync บิลไม่สำเร็จ ${failCount} รายการ: ${lastError}`, 'error', 5000);
+    if (failCount && !state.authExpired) toast(`Sync บิลไม่สำเร็จ ${failCount} รายการ: ${lastError}`, 'error', 5000);
     else toast(`Sync บิลสำเร็จ ${okCount} รายการ ✓`, 'success');
   }
 }
@@ -2493,6 +2919,7 @@ async function applyPulledState(r) {
   if (r.stock && typeof r.stock === 'object') {
     const s = sanitizeStock(r.stock, state.catalog);
     for (const q of state.queue) {
+      if (q.payload) continue;
       const o = state.orders.find((x) => x.id === q.orderId);
       if (!o) continue;
       const sign = q.action === 'NEW_ORDER' ? -1 : 1;
@@ -2518,6 +2945,7 @@ async function applyPulledState(r) {
     state.remoteOrders = { [r.date]: r.orders.map(normalizeRemoteOrder) };
     save.remote();
   }
+  if (Array.isArray(r.customers)) applyPulledCustomers(r.customers);
   sanitizeCart();
   save.cart();
   state.syncMeta.lastPullAt = fmtDateTime(new Date());
@@ -2587,12 +3015,13 @@ async function testConnection() {
   if (!url) return toast('กรุณาใส่ URL ก่อน', 'warn');
   if (!navigator.onLine) return toast('ออฟไลน์อยู่', 'warn');
   try {
-    const res = await fetchWithTimeout(url, { method: 'GET', redirect: 'follow' }, 20000);
+    const res = await cloudFetch(url, { method: 'GET' }, 20000);
     const json = JSON.parse(await res.text());
     if (json.ok) toast(`เชื่อมต่อสำเร็จ ✓ ${json.sheet ? `(${json.sheet})` : ''}${json.hasCatalog ? ' · มีเมนูบน Cloud แล้ว' : ''}`, 'success', 3500);
-    else toast(`เชื่อมต่อได้แต่มีข้อผิดพลาด: ${json.error}`, 'error', 5000);
+    else toast(`เชื่อมต่อได้แต่มีข้อผิดพลาด: ${json.code === 'BAD_KEY' ? 'รหัสลับ SYNC_SECRET ไม่ตรงกัน' : json.error}`, 'error', 6000);
   } catch (e) {
-    toast('เชื่อมต่อไม่สำเร็จ — ตรวจสอบ URL และการ Deploy (Who has access: Anyone)', 'error', 5000);
+    if (e && e.auth) return;
+    toast(isProxyUrl(url) ? `เชื่อมต่อไม่สำเร็จ: ${e.message || e}` : 'เชื่อมต่อไม่สำเร็จ — ตรวจสอบ URL และการ Deploy (Who has access: Anyone)', 'error', 6000);
   }
 }
 
@@ -2600,7 +3029,9 @@ async function testConnection() {
    18. SETTINGS, BACKUP & MAINTENANCE
    ========================================================================== */
 
-function openSettings() {
+async function openSettings(tab) {
+  if (!(await requirePerm('settings', 'ตั้งค่า'))) return;
+  if (tab) setTab = tab;
   renderSettings();
   openModal('m-settings');
 }
@@ -2616,10 +3047,12 @@ function storageUsageKB() {
   return Math.round(bytes / 1024);
 }
 
+let setTab = 'device';
+
 function renderSettings(keepInputs = false) {
   const modal = $('#m-settings');
   const val = (id) => ($(`#${id}`) ? $(`#${id}`).value : null);
-  const prev = keepInputs ? { url: val('gasUrl'), shop: val('shopNameInput'), sub: val('shopSubInput'), prefix: val('prefixInput') } : {};
+  const prev = keepInputs ? { url: val('gasUrl'), shop: val('shopNameInput'), sub: val('shopSubInput'), prefix: val('prefixInput'), qp: val('queuePrefixInput') } : {};
   const pick = (p, v) => (p != null ? p : v);
   const s = state.settings;
   const m = state.syncMeta;
@@ -2627,7 +3060,7 @@ function renderSettings(keepInputs = false) {
   const busy = state.cloudBusy || state.syncing;
   const canShare = !!(navigator.canShare && window.File);
   const dirtyParts = [
-    m.catalogDirty ? 'เมนู/หมวด/โปร' : '',
+    m.catalogDirty ? 'เมนู/หมวด/โปร/ตั้งค่าร้าน' : '',
     Object.keys(m.stockDirty).length ? `สต็อก ${Object.keys(m.stockDirty).length} รายการ` : '',
     Object.keys(m.imagesDirty).length ? `รูป ${Object.keys(m.imagesDirty).length} รูป` : '',
     m.settingsDirty ? 'ข้อมูลร้าน' : '',
@@ -2637,32 +3070,50 @@ function renderSettings(keepInputs = false) {
       <span class="switch ${s[key] ? 'on' : ''}"><span></span></span>
       <span><b>${label}</b><small>${help}</small></span>
     </button>`;
-
-  paint(modal.querySelector('.modal-body'), `
+  const tabs = [
+    ['device', 'เครื่องนี้', 'tablet'], ['sync', 'Cloud Sync', 'cloud'], ['shop', 'ร้าน & ใบเสร็จ', 'receipt'],
+    ['pay', 'การชำระเงิน', 'cash'], ['staff', 'พนักงาน & สิทธิ์', 'user'], ['loyalty', 'สมาชิก & แต้ม', 'star'],
+    ['kds', 'จอครัว (KDS)', 'chef'], ['backup', 'สำรอง & บำรุงรักษา', 'download'],
+  ];
+  let body = '';
+  if (setTab === 'device') {
+    body = `
+    <div class="section">
+      <div class="section-title">โหมดของเครื่องนี้</div>
+      <div class="type-cards two">
+        <button class="mode-card ${s.deviceMode === 'pos' ? 'on' : ''}" data-act="device-mode" data-v="pos" type="button"><b>🛒 ขายหน้าร้าน (POS)</b><small>รับออเดอร์ · ชำระเงิน · ออกใบเสร็จ</small></button>
+        <button class="mode-card ${s.deviceMode === 'kds' ? 'on' : ''}" data-act="device-mode" data-v="kds" type="button"><b>🍳 จอจัดออเดอร์ (KDS)</b><small>iPad หลังร้าน — แสดงคิวที่ต้องทำ/ส่งมอบ (ต้องตั้ง Cloud Sync)</small></button>
+      </div>
+    </div>
     <div class="section">
       <div class="section-title">Google Sheets Web App URL</div>
       <div class="row nowrap">
         <input class="input grow" id="gasUrl" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"
-          placeholder="https://script.google.com/macros/s/XXXX/exec" value="${esc(pick(prev.url, s.gasUrl))}" />
+          placeholder="${esc(SYNC_URL_META || 'https://script.google.com/macros/s/XXXX/exec')}" value="${esc(pick(prev.url, s.gasUrl))}" />
         <button class="btn btn-primary" data-act="save-url" type="button">บันทึก</button>
         <button class="btn btn-outline" data-act="test-url" type="button">${svg('link', 18)} ทดสอบ</button>
       </div>
-      <p class="help">ใช้ URL เดียวกันในทุกเครื่อง (ลงท้ายด้วย /exec) — ดูขั้นตอนใน README.md</p>
+      <p class="help">${isProxyUrl(s.gasUrl || '') ? '🔒 เชื่อมผ่าน Cloudflare <b>/api/sync</b> (ต้อง Login + รหัสลับฝั่งเซิร์ฟเวอร์) — ไม่ต้องใส่ URL ของ Google ในเครื่อง' : 'ใช้ URL เดียวกันในทุกเครื่อง (ลงท้ายด้วย /exec) — ดูขั้นตอนใน README.md'}</p>
     </div>
-
-    <div class="section sync-panel">
-      <div class="section-title">หลายเครื่อง — ซิงก์เมนู / รูป / สต็อก ผ่าน Cloud</div>
+    <div class="section">
       <div class="row" style="align-items:flex-end">
         <label class="ed-field" style="width:220px;margin:0"><span>รหัสเครื่อง (Device Prefix)</span>
           <input class="input" id="prefixInput" type="text" autocapitalize="characters" maxlength="10" value="${esc(pick(prev.prefix, s.devicePrefix))}" /></label>
-        <button class="btn btn-outline" data-act="save-prefix" type="button">บันทึกรหัสเครื่อง</button>
-        <span class="help grow">เลขบิล: <b>ORD-${esc(s.devicePrefix)}-${todayKey().replace(/-/g, '')}-001</b> — ตั้งให้ไม่ซ้ำกันในแต่ละเครื่อง เช่น IPAD1, IPAD2, PC1</span>
+        <label class="ed-field" style="width:200px;margin:0"><span>ตัวอักษรนำหน้าเลขคิว</span>
+          <input class="input" id="queuePrefixInput" type="text" autocapitalize="characters" maxlength="3" placeholder="เช่น A" value="${esc(pick(prev.qp, s.queuePrefix))}" /></label>
+        <button class="btn btn-outline" data-act="save-prefix" type="button">บันทึก</button>
       </div>
+      <p class="help">เลขบิล: <b>ORD-${esc(s.devicePrefix)}-${todayKey().replace(/-/g, '')}-001</b> · เลขคิว: <b>#${esc(s.queuePrefix)}01</b> (เริ่มใหม่ทุกวัน) — ถ้ามี POS หลายเครื่อง ตั้งตัวอักษรคิวให้ต่างกัน เช่น A / B</p>
+    </div>`;
+  } else if (setTab === 'sync') {
+    body = `
+    <div class="section sync-panel">
+      <div class="section-title">หลายเครื่อง — ซิงก์เมนู / รูป / สต็อก / ตั้งค่าร้าน ผ่าน Cloud</div>
       <div class="cloud-btns">
         <button class="btn btn-primary btn-lg" data-act="push-full" type="button" ${busy ? 'disabled' : ''}>☁️ อัปเดตเมนู/รูป/สต็อก ขึ้น Cloud<small>Push from Main</small></button>
         <button class="btn btn-outline btn-lg" data-act="pull" type="button" ${busy ? 'disabled' : ''}>📥 ดึงเมนู/รูป/สต็อก ล่าสุดจาก Cloud<small>Pull to this Device</small></button>
       </div>
-      ${toggle('autoPush', 'ส่งการเปลี่ยนแปลงขึ้น Cloud อัตโนมัติ', 'เมื่อแก้เมนู อัปโหลดรูป หรือแก้สต็อก (แนะนำให้เปิดในเครื่องหลัก)')}
+      ${toggle('autoPush', 'ส่งการเปลี่ยนแปลงขึ้น Cloud อัตโนมัติ', 'เมื่อแก้เมนู โปร อัปโหลดรูป หรือแก้สต็อก (แนะนำให้เปิดในเครื่องหลัก)')}
       ${toggle('autoPull', 'ซิงก์ข้อมูลเมนูและสต็อกจาก Cloud อัตโนมัติเมื่อเปิดแอป', 'เหมาะกับเครื่องรอง — เปิดแอปแล้วได้เมนู รูป และสต็อกล่าสุดทันที')}
       <dl class="kv" style="margin-top:10px">
         <dt>ส่งขึ้นล่าสุด</dt><dd>${esc(m.lastPushAt || '-')}</dd>
@@ -2671,23 +3122,23 @@ function renderSettings(keepInputs = false) {
         ${m.lastStateError ? `<dt>ข้อผิดพลาด</dt><dd style="color:var(--danger)">${esc(m.lastStateError)}</dd>` : ''}
       </dl>
     </div>
-
     <div class="section">
       <div class="row" style="margin-bottom:10px">
-        <div class="section-title grow" style="margin:0">คิวบิลรอ Sync (${q.length})</div>
+        <div class="section-title grow" style="margin:0">คิวรอ Sync (${q.length})</div>
         <button class="btn btn-primary" data-act="sync-all" type="button" ${state.syncing || !q.length ? 'disabled' : ''}>
           ${svg('cloud', 18)} ${state.syncing ? 'กำลัง Sync…' : 'Sync ข้อมูลทั้งหมดตอนนี้'}
         </button>
       </div>
       ${q.length ? `<div class="queue-list">${q.map((it) => `
         <div class="queue-item">
-          <span class="pill ${it.action === 'VOID_ORDER' ? 'pill-void' : 'pill-mute'}">${it.action}</span>
-          <div class="grow"><b>${esc(it.orderId)}</b> <span class="help">${esc(it.createdAt.replace('T', ' ').slice(0, 19))}</span>
+          <span class="pill ${it.action === 'VOID_ORDER' ? 'pill-void' : 'pill-mute'}">${esc(it.action)}</span>
+          <div class="grow"><b>${esc(it.orderId || it.label || '')}</b> <span class="help">${esc(it.createdAt.replace('T', ' ').slice(0, 19))}</span>
             ${it.lastError ? `<div class="q-err">พยายาม ${it.attempts} ครั้ง: ${esc(it.lastError)}</div>` : ''}</div>
-        </div>`).join('')}</div>` : '<div class="ok-box">ไม่มีบิลค้าง — Sync แล้วทั้งหมด ✓</div>'}
-      <p class="help">Sync บิลล่าสุด: ${esc(s.lastSyncAt || '-')}${s.lastSyncError ? ` · <span style="color:var(--danger)">${esc(s.lastSyncError)}</span>` : ''}</p>
-    </div>
-
+        </div>`).join('')}</div>` : '<div class="ok-box">ไม่มีรายการค้าง — Sync แล้วทั้งหมด ✓</div>'}
+      <p class="help">Sync ล่าสุด: ${esc(s.lastSyncAt || '-')}${s.lastSyncError ? ` · <span style="color:var(--danger)">${esc(s.lastSyncError)}</span>` : ''}</p>
+    </div>`;
+  } else if (setTab === 'shop') {
+    body = `
     <div class="section">
       <div class="section-title">ข้อมูลร้าน <small>(ซิงก์ไปทุกเครื่อง)</small></div>
       <div class="row">
@@ -2698,45 +3149,60 @@ function renderSettings(keepInputs = false) {
       </div>
       <div class="row" style="margin-top:10px"><button class="btn btn-outline" data-act="save-shop" type="button">บันทึกข้อมูลร้าน</button></div>
     </div>
-
+    ${settingsReceiptHTML()}`;
+  } else if (setTab === 'pay') body = settingsPayHTML();
+  else if (setTab === 'staff') body = settingsStaffHTML();
+  else if (setTab === 'loyalty') body = settingsLoyaltyHTML();
+  else if (setTab === 'kds') body = settingsKdsHTML();
+  else {
+    body = `
     <div class="section">
       <div class="section-title">สำรองข้อมูล (Backup)</div>
-      <p class="help" style="margin:0 0 10px">ไฟล์ JSON รวม เมนู · สต็อก · ประวัติบิล · คิว Sync · ตั้งค่า · รูปเมนู</p>
+      <p class="help" style="margin:0 0 10px">ไฟล์ JSON รวม เมนู · โปร · สต็อก · ประวัติบิล · ประวัติสต็อก · กะ · สมาชิก · คิว Sync · ตั้งค่า · รูปเมนู</p>
       <div class="row">
         <button class="btn btn-primary" data-act="export" type="button">${svg('download', 18)} Export Backup (JSON)</button>
         ${canShare ? `<button class="btn btn-outline" data-act="share" type="button">${svg('share', 18)} แชร์ไฟล์ Backup</button>` : ''}
         <button class="btn btn-outline" data-act="import" type="button">${svg('upload', 18)} Import Backup (JSON)</button>
       </div>
     </div>
-
     <div class="section">
       <div class="section-title">บำรุงรักษา</div>
       <dl class="kv">
         <dt>เวอร์ชันแอป</dt><dd>${APP_VERSION}</dd>
         <dt>เมนู / หมวด / โปร</dt><dd>${state.catalog.items.length} / ${state.catalog.categories.length} / ${state.catalog.promos.length}</dd>
-        <dt>บิลทั้งหมดในเครื่อง</dt><dd>${state.orders.length} บิล</dd>
-        <dt>พื้นที่ localStorage</dt><dd>~${storageUsageKB()} KB (จำกัดประมาณ 5,000 KB)</dd>
+        <dt>บิลทั้งหมดในเครื่อง</dt><dd>${state.orders.length} บิล ${OrderStore.usingLS ? '(localStorage)' : '(IndexedDB — เก็บได้หลายหมื่นบิล)'}</dd>
+        <dt>พื้นที่ localStorage</dt><dd>~${storageUsageKB()} KB (จำกัดประมาณ 5,000 KB · บิลไม่ได้เก็บที่นี่แล้ว)</dd>
       </dl>
       <div class="row" style="margin-top:10px">
         <button class="btn btn-outline" data-act="update-app" type="button">${svg('refresh', 18)} Update App Version</button>
-        <button class="btn btn-ghost" data-act="cleanup" type="button">ล้างบิลเก่าที่ Sync แล้ว (เกิน 60 วัน)</button>
+        <button class="btn btn-ghost" data-act="cleanup" type="button">ล้างบิลเก่าที่ Sync แล้ว (เกิน 365 วัน)</button>
       </div>
-    </div>`);
+    </div>`;
+  }
+
+  paint(modal.querySelector('.modal-body'), `
+    <div class="mgr-tabs set-tabs">
+      ${tabs.map(([id, label, ic]) => `<button class="mgr-tab ${setTab === id ? 'on' : ''}" data-stab="${id}" type="button">${svg(ic, 18)} ${label}</button>`).join('')}
+    </div>
+    ${body}`);
 }
 
-function backupPayload() {
+async function backupPayload() {
+  let stockLog = [], shifts = [];
+  try { stockLog = await DataDB.all('stocklog'); shifts = await DataDB.all('shifts'); } catch (e) { /* IDB unavailable */ }
   return {
-    app: 'ipad-pos', schema: 2, appVersion: APP_VERSION, exportedAt: isoLocal(new Date()),
+    app: 'ipad-pos', schema: 3, appVersion: APP_VERSION, exportedAt: isoLocal(new Date()),
     catalog: state.catalog, stock: state.stock, orders: state.orders, queue: state.queue,
     settings: state.settings, images: state.images,
+    stockLog, shifts, shift: state.shift, parked: state.parked, customers: state.customers,
   };
 }
 function backupFileName() {
   const d = new Date();
   return `pos-backup-${state.settings.devicePrefix}-${dateKey(d)}-${pad(d.getHours())}${pad(d.getMinutes())}.json`;
 }
-function exportBackup() {
-  const blob = new Blob([JSON.stringify(backupPayload())], { type: 'application/json' });
+async function exportBackup() {
+  const blob = new Blob([JSON.stringify(await backupPayload())], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = backupFileName();
@@ -2748,7 +3214,7 @@ function exportBackup() {
 async function shareBackup() {
   try {
     const name = backupFileName();
-    const file = new File([JSON.stringify(backupPayload())], name, { type: 'application/json' });
+    const file = new File([JSON.stringify(await backupPayload())], name, { type: 'application/json' });
     if (!navigator.canShare || !navigator.canShare({ files: [file] })) return exportBackup();
     await navigator.share({ files: [file], title: name });
   } catch (e) {
@@ -2777,9 +3243,18 @@ async function importBackup(file) {
   state.queue = Array.isArray(data.queue) ? data.queue : [];
   state.settings = Object.assign(defaultSettings(), data.settings || {});
   if (!state.settings.gasUrl && keepUrl) state.settings.gasUrl = keepUrl;
-  state.cart = { lines: [], manualDiscount: '' };
+  fixSyncUrl(state.settings);
+  state.cart = emptyCart();
+  state.parked = Array.isArray(data.parked) ? data.parked : [];
+  state.customers = data.customers && typeof data.customers === 'object' ? data.customers : {};
+  state.shift = data.shift || null;
   $('#manualDiscount').value = '';
-  const ok = save.catalog() && save.orders() && save.stock() && save.queue() && save.settings() && save.cart();
+  const ok = save.catalog() && (await OrderStore.replaceAll(state.orders)) && save.stock() && save.queue() && save.settings() && save.cart()
+    && save.parked() && save.customers() && save.shift();
+  try {
+    if (Array.isArray(data.stockLog)) { await DataDB.clear('stocklog'); await DataDB.put('stocklog', data.stockLog); }
+    if (Array.isArray(data.shifts)) { await DataDB.clear('shifts'); await DataDB.put('shifts', data.shifts); }
+  } catch (e) { console.warn('restore logs failed', e); }
   await ImageStore.clear();
   state.images = {};
   for (const [id, url] of Object.entries(data.images || {})) {
@@ -2794,7 +3269,7 @@ async function importBackup(file) {
   toast(ok ? 'นำเข้าข้อมูลสำเร็จ ✓ (กด “อัปเดตขึ้น Cloud” ถ้าต้องการให้เครื่องอื่นได้ข้อมูลนี้)' : 'นำเข้าแล้วบางส่วน — พื้นที่จัดเก็บไม่พอ', ok ? 'success' : 'error', 5000);
 }
 async function cleanupOldOrders() {
-  const cutoff = shiftDateKey(todayKey(), -60);
+  const cutoff = shiftDateKey(todayKey(), -365);
   const queued = new Set(state.queue.map((q) => q.orderId));
   const removable = state.orders.filter((o) => o.date < cutoff && !queued.has(o.id) && o.synced && (o.status !== 'VOIDED' || o.voidSynced));
   if (!removable.length) return toast('ไม่มีบิลเก่าที่ลบได้', '');
@@ -2807,7 +3282,7 @@ async function cleanupOldOrders() {
   if (!r.ok) return;
   const ids = new Set(removable.map((o) => o.id));
   state.orders = state.orders.filter((o) => !ids.has(o.id));
-  save.orders();
+  await OrderStore.remove([...ids]);
   renderSettings();
   toast(`ลบ ${removable.length} บิลแล้ว`, 'success');
 }
@@ -2860,9 +3335,10 @@ const cleanNum = (v) => v.replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
 function bindEvents() {
   $('#btnSync').addEventListener('click', syncAll);
   $('#btnStock').addEventListener('click', () => openManager());
-  $('#btnHistory').addEventListener('click', openHistory);
-  $('#btnSettings').addEventListener('click', openSettings);
+  $('#btnHistory').addEventListener('click', () => openHistory());
+  $('#btnSettings').addEventListener('click', () => openSettings());
   $('#btnUpdate').addEventListener('click', updateApp);
+  $('#btnStaff').addEventListener('click', openStaffMenu);
 
   $('#catTabs').addEventListener('click', (e) => {
     if (e.target.closest('[data-act="cat-manage"]')) { openManager('cats'); return; }
@@ -2882,27 +3358,63 @@ function bindEvents() {
     const b = e.target.closest('[data-act]');
     if (!b) return;
     const id = b.dataset.id;
+    const act = b.dataset.act;
     const line = state.cart.lines.find((l) => l.id === id);
-    if (b.dataset.act === 'inc') changeQty(id, 1);
-    else if (b.dataset.act === 'dec') changeQty(id, -1);
-    else if (b.dataset.act === 'remove') removeLine(id);
-    else if (b.dataset.act === 'edit' && line) {
+    if (act === 'inc') changeQty(id, 1);
+    else if (act === 'dec') changeQty(id, -1);
+    else if (act === 'remove') removeLine(id);
+    else if (act === 'note' && line) editNote(line);
+    else if (act === 'bill-note') editNote(null);
+    else if (act === 'parked') openParked();
+    else if (act === 'edit' && line) {
       if (line.type === 'weight') openWeight(line.menuId, line);
       else if (line.type === 'set') openSet(line.menuId, line);
     }
   });
   $('#btnClearCart').addEventListener('click', clearCart);
+  $('#btnPark').addEventListener('click', () => (state.cart.lines.length ? parkCart() : openParked()));
+  $('#promoRows').addEventListener('click', (e) => { if (e.target.closest('[data-act="promo-pick"]')) openPromoPicker(); });
   const manual = $('#manualDiscount');
   manual.value = state.cart.manualDiscount || '';
   manual.addEventListener('input', () => {
+    if (manual.readOnly) return;
     const cleaned = cleanNum(manual.value);
     if (cleaned !== manual.value) manual.value = cleaned;
     state.cart.manualDiscount = cleaned;
     save.cart();
     renderTotals();
   });
-  manual.addEventListener('focus', () => manual.select());
+  manual.addEventListener('focus', async () => {
+    if (!manual.readOnly) { manual.select(); return; }
+    manual.blur();
+    const who = await requirePerm('discount', 'ให้ส่วนลดเพิ่มเติม', { force: true });
+    if (!who) return;
+    state.cart.discountBy = who.name || 'เจ้าของร้าน';
+    save.cart();
+    renderTotals();
+    manual.focus();
+  });
   $('#btnCheckout').addEventListener('click', openPayment);
+
+  // dynamic modals (created on demand) — one delegated listener per event type
+  const MODAL = {
+    'm-promo': { click: promoEditorClick, change: promoEditorChange },
+    'm-promopick': { click: promoPickerClick },
+    'm-done': { click: orderDoneClick },
+    'm-parked': { click: parkedClick },
+    'm-shift': { click: shiftClick, input: shiftInput },
+    'm-stockadj': { click: stockAdjClick, input: stockAdjInput },
+    'm-pin': { click: pinClick },
+    'm-staffmenu': { click: staffMenuClick },
+    'm-note': { click: noteClick },
+  };
+  for (const type of ['click', 'change', 'input']) {
+    document.addEventListener(type, (e) => {
+      const m = e.target.closest && e.target.closest('.modal');
+      const h = m && MODAL[m.id];
+      if (h && h[type]) h[type](e);
+    });
+  }
 
   document.addEventListener('click', (e) => {
     const c = e.target.closest('[data-close]');
@@ -2947,20 +3459,28 @@ function bindEvents() {
     if (m) { payCtx.method = m.dataset.method; renderPayment(); return; }
     const c = e.target.closest('[data-cash]');
     if (c) {
-      const t = calcTotals(state.cart.lines, state.cart.manualDiscount);
+      const t = cartTotals();
       payCtx.cash = c.dataset.cash === 'exact' ? String(t.net) : c.dataset.cash;
       $('#payCash').value = payCtx.cash;
       return updatePayState();
     }
-    if (e.target.closest('[data-act="pay-ok"]')) confirmPayment();
+    const b = e.target.closest('[data-act]');
+    if (!b) return;
+    const act = b.dataset.act;
+    if (act === 'pay-ok') confirmPayment();
+    else if (act === 'member-find') memberFind();
+    else if (act === 'member-clear') { state.cart.customer = null; payCtx.phone = ''; save.cart(); renderPayment(); renderTotals(); }
+    else if (act === 'redeem' || act === 'redeem-max') memberRedeem(act === 'redeem-max' ? 'max' : Number(b.dataset.d));
   });
   pay.addEventListener('input', (e) => {
+    if (e.target.id === 'memberPhone') { payCtx.phone = e.target.value.replace(/[^\d]/g, ''); return; }
     if (e.target.id !== 'payCash') return;
     const cleaned = cleanNum(e.target.value);
     if (cleaned !== e.target.value) e.target.value = cleaned;
     payCtx.cash = cleaned;
     updatePayState();
   });
+  pay.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'memberPhone') memberFind(); });
 
   // manager modal
   const mm = $('#m-manage');
@@ -2970,7 +3490,11 @@ function bindEvents() {
     const f = e.target.closest('[data-mcat]');
     if (f) { mgr.catFilter = f.dataset.mcat; return renderManager(); }
     const q = e.target.closest('[data-quick]');
-    if (q) { const k = q.dataset.quick; return setStock(k, Math.max(0, (state.stock[k] || 0) + Number(q.dataset.n))); }
+    if (q) {
+      const k = q.dataset.quick;
+      const n = Number(q.dataset.n);
+      return setStock(k, Math.max(0, (state.stock[k] || 0) + n), { reason: n > 0 ? 'restock' : 'count' });
+    }
     const b = e.target.closest('[data-act]');
     if (!b || b.disabled) return;
     const act = b.dataset.act;
@@ -2978,29 +3502,22 @@ function bindEvents() {
     else if (act === 'item-edit') openItemEditor(b.dataset.id);
     else if (act === 'avail') setAvailability(b.dataset.id, b.dataset.v);
     else if (act.startsWith('cat-')) catAction(act, b.dataset.id);
-    else if (act.startsWith('promo-')) promoAction(act, b.dataset.id);
+    else if (act.startsWith('promo-')) promoAction(act, b.dataset.id, b);
     else if (act.startsWith('pool-')) poolAction(act, b.dataset.id);
+    else if (act.startsWith('shop-')) mgrShopAction(act, b);
+    else if (act.startsWith('log-')) stockLogAction(act, b);
   });
   mm.addEventListener('change', (e) => {
     const el = e.target;
     const d = el.dataset;
-    if (d.stock) return setStock(d.stock, el.value);
+    if (d.stock) return setStock(d.stock, el.value, { reason: 'count' });
     if (d.catname) { const c = IDX.cat[d.catname]; if (c && el.value.trim()) { c.name = el.value.trim(); commitCatalog(); renderManager(); } return; }
-    if (d.catpromo) { const c = IDX.cat[d.catpromo]; if (c) { c.promoId = el.value; commitCatalog(); renderManager(); } return; }
-    if (d.promo) {
-      const p = IDX.promo[d.promo];
-      if (!p) return;
-      if (d.f === 'name') p.name = el.value.trim() || p.name;
-      if (d.f === 'size') p.size = Math.max(2, toInt(el.value) || 2);
-      if (d.f === 'price') p.price = Math.max(0, num(el.value));
-      commitCatalog();
-      renderManager();
-      return;
-    }
-    if (d.member) { togglePromoMember(d.member, d.item, el.checked); return; }
-    if (d.poolname) { const p = IDX.pool[d.poolname]; if (p && el.value.trim()) { p.name = el.value.trim(); commitCatalog(); } }
+    if (d.poolname) { const p = IDX.pool[d.poolname]; if (p && el.value.trim()) { p.name = el.value.trim(); commitCatalog(); } return; }
+    if (d.poolcost) { const p = IDX.pool[d.poolcost]; if (p) { p.cost = Math.max(0, num(el.value)); commitCatalog(); } return; }
+    if (d.shop) mgrShopChange(el);
+    if (d.log) stockLogChange(el);
   });
-  mm.addEventListener('focusin', (e) => { if (e.target.dataset.stock) e.target.select(); });
+  mm.addEventListener('focusin', (e) => { if (e.target.dataset.stock && !e.target.readOnly) e.target.select(); });
 
   // item editor
   const mi = $('#m-item');
@@ -3020,9 +3537,19 @@ function bindEvents() {
   });
   $('#imageInput').addEventListener('change', (e) => onImagePicked(e.target.files && e.target.files[0]));
 
-  // history
+  // history / reports / shifts
   const hist = $('#m-history');
-  hist.addEventListener('click', (e) => {
+  hist.addEventListener('click', async (e) => {
+    const ht = e.target.closest('[data-htab]');
+    if (ht) {
+      if (ht.dataset.htab === 'report' && !(await requirePerm('reports', 'ดูรายงาน & กำไร'))) return;
+      histTab = ht.dataset.htab;
+      renderHistory();
+      if (histTab === 'report') loadReportRemote();
+      return;
+    }
+    if (histTab === 'report') return reportClick(e);
+    if (histTab === 'shift') return shiftHistoryClick(e);
     const d = e.target.closest('[data-day]');
     if (d && !d.disabled) {
       histDate = d.dataset.day === 'today' ? todayKey() : shiftDateKey(histDate, Number(d.dataset.day));
@@ -3039,9 +3566,12 @@ function bindEvents() {
       return;
     }
     const v = e.target.closest('[data-void]');
-    if (v) voidOrder(v.dataset.void);
+    if (v) return voidOrder(v.dataset.void);
+    const rc = e.target.closest('[data-receipt]');
+    if (rc) { const o = state.orders.find((x) => x.id === rc.dataset.receipt); if (o) showOrderDone(o, true); }
   });
   hist.addEventListener('change', (e) => {
+    if (histTab === 'report') return reportChange(e);
     if (e.target.id === 'histDate' && e.target.value) {
       histDate = e.target.value;
       renderHistory();
@@ -3050,13 +3580,16 @@ function bindEvents() {
   });
 
   // settings
-  $('#m-settings').addEventListener('click', (e) => {
+  const st = $('#m-settings');
+  st.addEventListener('click', (e) => {
+    const tb = e.target.closest('[data-stab]');
+    if (tb) { setTab = tb.dataset.stab; return renderSettings(); }
     const b = e.target.closest('[data-act]');
     if (!b || b.disabled) return;
     const act = b.dataset.act;
     if (act === 'save-url') {
       const url = $('#gasUrl').value.trim();
-      if (url && !/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) toast('URL ไม่ใช่ Google Apps Script — ตรวจสอบอีกครั้ง', 'warn', 3500);
+      if (url && !isProxyUrl(url) && !/^https:\/\/script\.google(usercontent)?\.com\//.test(url)) toast('URL ไม่ใช่ Google Apps Script หรือ /api/sync — ตรวจสอบอีกครั้ง', 'warn', 3500);
       state.settings.gasUrl = url;
       save.settings();
       renderSettings();
@@ -3076,6 +3609,7 @@ function bindEvents() {
       const p = sanitizePrefix($('#prefixInput').value);
       if (!p) return toast('รหัสเครื่องใช้ได้เฉพาะ A-Z และ 0-9', 'warn');
       state.settings.devicePrefix = p;
+      state.settings.queuePrefix = sanitizePrefix($('#queuePrefixInput').value).slice(0, 3);
       save.settings();
       renderSettings();
       toast(`รหัสเครื่อง: ${p}`, 'success');
@@ -3087,12 +3621,15 @@ function bindEvents() {
       renderHeader();
       renderSettings();
       toast('บันทึกข้อมูลร้านแล้ว', 'success');
-    } else if (act === 'export') exportBackup();
+    } else if (act === 'device-mode') setDeviceMode(b.dataset.v);
+    else if (act === 'export') exportBackup();
     else if (act === 'share') shareBackup();
     else if (act === 'import') { $('#importInput').value = ''; $('#importInput').click(); }
     else if (act === 'cleanup') cleanupOldOrders();
     else if (act === 'update-app') updateApp();
+    else settingsAction(act, b);
   });
+  st.addEventListener('change', (e) => settingsChange(e.target));
   $('#importInput').addEventListener('change', (e) => importBackup(e.target.files && e.target.files[0]));
 
   window.addEventListener('online', () => {
@@ -3105,19 +3642,20 @@ function bindEvents() {
 
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    const open = $$('.modal.open');
-    if (open.length && open[open.length - 1].id !== 'm-confirm') open[open.length - 1].classList.remove('open');
+    const open = $$('.modal.open').filter((m) => !['m-confirm', 'm-lock'].includes(m.id));
+    if (open.length) open[open.length - 1].classList.remove('open');
   });
   document.addEventListener('gesturestart', (e) => e.preventDefault());
 
-  window.addEventListener('storage', (e) => {
+  window.addEventListener('storage', async (e) => {
     if (!e.key || !e.key.startsWith('pos.v1.')) return;
     state.catalog = normalizeCatalog(lsGet(LS.catalog, null));
     reindex();
     state.stock = sanitizeStock(lsGet(LS.stock, null), state.catalog);
-    state.orders = lsGet(LS.orders, []);
     state.queue = lsGet(LS.queue, []);
-    renderAll();
+    state.parked = lsGet(LS.parked, []) || [];
+    state.orders = await OrderStore.load();
+    if (state.settings.deviceMode !== 'kds') renderAll();
   });
 }
 
@@ -3129,15 +3667,19 @@ async function init() {
     save.cart();
   }
   save.settings();
+  state.orders = await OrderStore.load();
   bindEvents();
   renderClock();
   setInterval(renderClock, 1000);
-  renderAll();
+  const kds = state.settings.deviceMode === 'kds';
+  document.body.classList.toggle('mode-kds', kds);
+  if (kds) startKDS(); else renderAll();
+  if (!kds && state.catalog.staff.length && !state.session) showLock();
 
   try {
     state.images = await ImageStore.getAll();
     await shrinkLegacyImages();
-    renderMenu();
+    if (!kds) renderMenu();
   } catch (e) {
     console.warn('image load failed', e);
   }
@@ -3161,6 +3703,7 @@ async function init() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
     if (state.queue.length) syncNow({ silent: true });
+    if (state.settings.deviceMode === 'kds') return kdsPoll();
     if (state.settings.autoPull && hasUrl() && !state.cart.lines.length && Date.now() - hiddenAt > 3 * 60000) pullState({ silent: true });
   });
 }

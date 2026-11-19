@@ -6,6 +6,8 @@
   <title>Maysa.Meekanom</title>
   <meta name="description" content="ระบบขายหน้าร้าน (POS) สำหรับ iPad ทำงานแบบออฟไลน์ได้ 100%" />
   <meta name="theme-color" content="#862d28" />
+  <!-- Sync goes through the Cloudflare Pages Function (behind Cloudflare Access). Remove to talk to Apps Script directly. -->
+  <meta name="pos-sync-url" content="/api/sync" />
 
   <!-- iOS / iPadOS standalone (Add to Home Screen) -->
   <meta name="mobile-web-app-capable" content="yes" />
@@ -57,6 +59,7 @@
 
       <div class="topbar-spacer"></div>
 
+      <button class="hbtn hbtn-staff" id="btnStaff" type="button" aria-label="ผู้ใช้ &amp; กะ"></button>
       <button class="hbtn" id="btnSync" type="button">
         <span data-icon="cloud"></span>
         <span id="syncLabel">Sync Pending (0)</span>
@@ -90,7 +93,10 @@
       <aside class="cart-panel" aria-label="ตะกร้า">
         <div class="cart-head">
           <div class="cart-title"><span data-icon="cart"></span> ออเดอร์ปัจจุบัน <span class="cart-count" id="cartCount">0</span></div>
-          <button class="btn-text" id="btnClearCart" type="button">ล้างตะกร้า</button>
+          <div class="cart-head-btns">
+            <button class="btn-text btn-park" id="btnPark" type="button">พักบิล</button>
+            <button class="btn-text" id="btnClearCart" type="button">ล้างตะกร้า</button>
+          </div>
         </div>
 
         <div class="cart-list" id="cartList"></div>
@@ -198,6 +204,13 @@
   <input type="file" id="importInput" accept="application/json,.json" hidden />
   <div id="toastHost" aria-live="polite"></div>
 
+  <div id="printArea" aria-hidden="true"></div>
+
+  <!-- load order matters: promo.js is used while app.js builds its state -->
+  <script src="./vendor/qrcode.min.js"></script>
+  <script src="./promo.js"></script>
   <script src="./app.js"></script>
+  <script src="./features.js"></script>
+  <script src="./kds.js"></script>
 </body>
 </html>

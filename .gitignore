@@ -4,3 +4,5 @@ Thumbs.db
 __test*
 node_modules/
 icons/สำเนา*
+.dev.vars
+.wrangler/

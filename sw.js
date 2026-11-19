@@ -6,7 +6,7 @@
    localStorage / IndexedDB are never touched by this file.
    ========================================================================== */
 
-const SW_VERSION = '2.0.1';
+const SW_VERSION = '3.1.0';
 const CACHE_PREFIX = 'ipad-pos-';
 const CACHE_NAME = `${CACHE_PREFIX}${SW_VERSION}`;
 const NETWORK_TIMEOUT_MS = 4000;
@@ -16,6 +16,10 @@ const APP_SHELL = [
   './index.html',
   './styles.css',
   './app.js',
+  './promo.js',
+  './features.js',
+  './kds.js',
+  './vendor/qrcode.min.js',
   './manifest.json',
   './icons/logo-mascot.png',
   './icons/icon-192.png',
@@ -30,6 +34,12 @@ const EXTERNAL_ASSETS = [
 
 // Never intercept the Google Sheets sync endpoint
 const BYPASS_HOSTS = ['script.google.com', 'script.googleusercontent.com'];
+// Same-origin paths that must always hit the network: the sync proxy and Cloudflare Access (login / logout)
+const BYPASS_PATHS = ['/api/', '/cdn-cgi/'];
+
+/** Only cache real app files — never a login page we were redirected to. */
+const cacheable = (res) => !!res && res.ok && res.type !== 'opaqueredirect'
+  && (!res.url || new URL(res.url).origin === self.location.origin);
 
 /* ---------- precache ---------- */
 async function precache() {
@@ -37,7 +47,7 @@ async function precache() {
   const results = await Promise.allSettled([
     ...APP_SHELL.map(async (url) => {
       const res = await fetch(new Request(url, { cache: 'reload' }));
-      if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+      if (!cacheable(res)) throw new Error(`${url} → HTTP ${res.status}${res.redirected ? ' (redirected — login?)' : ''}`);
       await cache.put(url, await cleanResponse(res));
     }),
     ...EXTERNAL_ASSETS.map(async (url) => {
@@ -79,6 +89,7 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url);
   if (!url.protocol.startsWith('http')) return;
   if (BYPASS_HOSTS.some((h) => url.hostname === h || url.hostname.endsWith(`.${h}`))) return;
+  if (url.origin === self.location.origin && BYPASS_PATHS.some((p) => url.pathname.startsWith(p))) return;
   event.respondWith(networkFirst(event, req, url));
 });
 
@@ -95,12 +106,15 @@ async function networkFirst(event, req, url) {
   const sameOrigin = url.origin === self.location.origin;
 
   const network = (async () => {
-    // same-origin: revalidate with the server so a new GitHub Pages commit is picked up immediately
-    let res = (isNav || sameOrigin)
-      ? await fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' })
-      : await fetch(req);
+    // same-origin: revalidate with the server so a new deploy is picked up immediately.
+    // Navigations use redirect:'manual' so an expired Cloudflare Access session hands the browser
+    // the redirect to the login page (instead of silently showing the cached app forever).
+    let res = isNav
+      ? await fetch(new Request(req.url, { cache: 'no-cache', credentials: 'include', redirect: 'manual' }))
+      : sameOrigin ? await fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }) : await fetch(req);
+    if (res.type === 'opaqueredirect') return res;
     if (isNav) res = await cleanResponse(res);
-    if (res && (res.ok || res.type === 'opaque')) {
+    if (res && (cacheable(res) || (!sameOrigin && res.type === 'opaque'))) {
       const copy = res.clone();
       event.waitUntil(caches.open(CACHE_NAME).then((c) => c.put(req, copy)).catch(() => {}));
     }
@@ -113,6 +127,7 @@ async function networkFirst(event, req, url) {
   try {
     const first = await Promise.race([network, timeout]);
     if (first !== '__timeout__') {
+      if (first.type === 'opaqueredirect') return first; // → Cloudflare Access login
       if (first.ok || first.type === 'opaque') return first;
       const cached = await matchCache(req, isNav); // server error → prefer cached copy
       return cached || first;
