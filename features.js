@@ -33,14 +33,38 @@ function can(perm) {
 }
 
 /**
- * Resolve to { id, name, role } of whoever is allowed to do `perm` — the current user, or someone
- * who types an authorised PIN now (owner override). Resolves null if cancelled.
+ * Resolve to { id, name, role } of the current user when they hold `perm`, otherwise null.
+ * A permission that is not granted is HIDDEN in the UI (see applyPermUI) — there is no "ask the owner for a PIN" path;
+ * the owner switches to their own account instead.
  */
-async function requirePerm(perm, label, { force = false } = {}) {
+async function requirePerm(perm, label) {
   if (!staffMode()) return { id: '', name: (state.session && state.session.name) || '', role: 'owner' };
-  if (can(perm) && !force) return { id: state.session.staffId, name: state.session.name, role: state.session.role };
-  const ok = (st) => st.role === 'owner' || prefs().perms[perm] === 'staff';
-  return askPin({ title: '🔒 ต้องใช้ PIN ผู้มีสิทธิ์', sub: `${label} — ${PERMS[perm] || ''}`, filter: ok });
+  if (can(perm)) return { id: state.session.staffId, name: state.session.name, role: state.session.role };
+  toast(`บัญชีนี้ไม่มีสิทธิ์: ${label}`, 'warn', 2500);
+  return null;
+}
+
+/** Show / hide every control according to the logged-in account. Called on every header render (= on every user switch). */
+function applyPermUI() {
+  const hide = (el, on) => { if (typeof el === 'string') el = $(el); if (el) el.classList.toggle('perm-hide', !!on); };
+  hide('#btnStock', !can('manage'));
+  hide('#btnSettings', !can('settings'));
+  const m = $('#manualDiscount');
+  if (m) {
+    hide(m.closest('.manual-row'), !can('discount'));
+    hide('#manualNote', !can('discount'));
+    if (!can('discount') && (state.cart.manualDiscount || state.cart.discountBy)) {
+      state.cart.manualDiscount = '';
+      state.cart.discountBy = '';
+      m.value = '';
+      save.cart();
+    }
+  }
+}
+
+/** Close every open window except the PIN pad / confirm — used when the account changes so nothing from the old account stays on screen. */
+function closeAllOverlays() {
+  $$('.modal.open').forEach((m) => { if (m.id !== 'm-pin' && m.id !== 'm-confirm') m.classList.remove('open'); });
 }
 
 let pinCtx = null;
@@ -102,8 +126,10 @@ async function tryPin(explicit) {
     if (c.lock) {
       state.session = { staffId: st.id, name: st.name, role: st.role, at: isoLocal(new Date()) };
       save.session();
+      closeAllOverlays();
+      logActivity('LOGIN', `เข้าสู่ระบบ (${st.role === 'owner' ? 'เจ้าของร้าน' : 'พนักงานขาย'})`);
       renderHeader();
-      if (state.settings.deviceMode !== 'kds') renderCart();
+      if (state.settings.deviceMode !== 'kds') { renderCart(); renderMenu(); }
       toast(`สวัสดี ${st.name} 👋`, 'success', 1800);
     }
     return c.resolve(who);
@@ -121,9 +147,12 @@ function showLock() {
   return askPin({ title: 'เข้าสู่ระบบ', lock: true });
 }
 function logout() {
+  logActivity('LOGOUT', 'ออกจากระบบ / ล็อกหน้าจอ');
   state.session = null;
   save.session();
+  closeAllOverlays();
   renderHeader();
+  renderCart();
   if (staffMode()) showLock();
 }
 
@@ -193,7 +222,7 @@ function settingsStaffHTML() {
       ${owners ? '' : (st.length ? '<div class="err-box">ต้องมีเจ้าของร้านอย่างน้อย 1 คน</div>' : '')}
     </div>
     <div class="section">
-      <div class="section-title">สิทธิ์ของพนักงานขาย <small>(เจ้าของร้านทำได้ทุกอย่าง · ถ้าไม่มีสิทธิ์ ระบบจะขอ PIN เจ้าของร้านเฉพาะครั้งนั้น)</small></div>
+      <div class="section-title">สิทธิ์ของพนักงานขาย <small>(เจ้าของร้านทำได้ทุกอย่าง · ปิดสิทธิ์ = ซ่อนปุ่ม / เมนู / ตัวเลขนั้นจากพนักงานทันที ต้องสลับไปบัญชีเจ้าของร้านเพื่อใช้)</small></div>
       ${Object.keys(PERMS).map((k) => `
         <div class="perm-row"><span class="grow">${esc(PERMS[k])}</span>
           <div class="seg">
@@ -313,6 +342,7 @@ async function parkCart() {
   if (!r.ok) return;
   state.parked.push({ id: uid(), name: r.value || `บิลพัก ${state.parked.length + 1}`, at: isoLocal(new Date()), atTH: fmtDateTime(new Date()), net: t.net, cart: clone(state.cart) });
   save.parked();
+  logActivity('PARK', `พักบิล “${state.parked[state.parked.length - 1].name}”`, t.net);
   resetCart();
   toast(`พักบิล “${state.parked[state.parked.length - 1].name}” แล้ว`, 'success');
 }
@@ -618,16 +648,18 @@ function computeShift(sh) {
   const orders = state.orders.filter((o) => o.shiftId === sh.id);
   const done = orders.filter((o) => o.status !== 'VOIDED');
   const isCash = (o) => (o.payment.kind ? o.payment.kind === 'cash' : isCashMethod(o.payment.method));
-  const cashSales = round2(done.filter(isCash).reduce((s, o) => s + o.net, 0));
+  // cash that really stays in the drawer = received − change (stored as cashInDrawer; = net)
+  const drawer = (o) => (o.payment.cashInDrawer != null ? o.payment.cashInDrawer : o.net);
+  const cashSales = sumMoney(done.filter(isCash), drawer);
   const byMethod = {};
-  for (const o of done) byMethod[o.payment.label] = round2((byMethod[o.payment.label] || 0) + o.net);
-  const payIn = round2(sh.moves.filter((m) => m.type === 'in').reduce((s, m) => s + m.amount, 0));
-  const payOut = round2(sh.moves.filter((m) => m.type === 'out').reduce((s, m) => s + m.amount, 0));
+  for (const o of done) byMethod[o.payment.label] = fromSatang(toSatang(byMethod[o.payment.label] || 0) + toSatang(o.net));
+  const payIn = sumMoney(sh.moves.filter((m) => m.type === 'in'), (m) => m.amount);
+  const payOut = sumMoney(sh.moves.filter((m) => m.type === 'out'), (m) => m.amount);
   return {
     bills: done.length, voids: orders.length - done.length,
-    netSales: round2(done.reduce((s, o) => s + o.net, 0)),
+    netSales: sumMoney(done, (o) => o.net),
     cashSales, byMethod, payIn, payOut,
-    expected: round2(sh.float + cashSales + payIn - payOut),
+    expected: fromSatang(toSatang(sh.float) + toSatang(cashSales) + toSatang(payIn) - toSatang(payOut)),
   };
 }
 
@@ -653,18 +685,13 @@ function renderShift(keepFocus) {
     return;
   }
   const x = computeShift(sh);
+  const showSales = can('salesTotals');
+  const showVar = can('variance');
   const counted = c.counted === '' ? null : round2(parseFloat(c.counted) || 0);
-  const diff = counted == null ? null : round2(counted - x.expected);
-  m.querySelector('.modal-body').innerHTML = `
-    <div class="stat-grid four">
-      <div class="stat"><div class="k">เปิดกะ</div><div class="v sm">${esc(sh.openedAtTH.slice(11, 16))} น.</div><div class="s">${esc(sh.openedBy || '-')} · ${esc(sh.openedAtTH.slice(0, 10))}</div></div>
-      <div class="stat"><div class="k">ยอดขายในกะ</div><div class="v">${money(x.netSales)}</div><div class="s">${x.bills} บิล${x.voids ? ` · ยกเลิก ${x.voids}` : ''}</div></div>
-      <div class="stat"><div class="k">ขายเงินสด</div><div class="v">${money(x.cashSales)}</div><div class="s">${Object.keys(x.byMethod).map((k) => `${esc(k)} ${money(x.byMethod[k])}`).join(' · ') || '-'}</div></div>
-      <div class="stat primary"><div class="k">เงินสดที่ควรมีในลิ้นชัก</div><div class="v">${money(x.expected)}</div><div class="s">ตั้งต้น ${money(sh.float)} + ขาย ${money(x.cashSales)} + เข้า ${money(x.payIn)} − ออก ${money(x.payOut)}</div></div>
-    </div>
-    <div class="shift-cols">
+  const diff = counted == null ? null : fromSatang(toSatang(counted) - toSatang(x.expected));
+  const moveBox = can('cashMove') ? `
       <div class="card-box">
-        <div class="section-title" style="margin-top:0">เงินเข้า-ออกระหว่างกะ ${can('cashMove') ? '' : '🔒'}</div>
+        <div class="section-title" style="margin-top:0">เงินเข้า-ออกระหว่างกะ</div>
         <div class="seg" style="margin-bottom:8px">
           <button class="${c.type === 'out' ? 'on' : ''}" data-shq="type" data-v="out" type="button">− นำเงินออก (Pay-out)</button>
           <button class="${c.type === 'in' ? 'on' : ''}" data-shq="type" data-v="in" type="button">+ นำเงินเข้า (Pay-in)</button>
@@ -674,14 +701,27 @@ function renderShift(keepFocus) {
         <div class="chips" style="margin:8px 0">${CASH_REASONS[c.type].map((r) => `<button class="mchip ${c.reason === r ? 'on' : ''}" data-shq="reason" data-v="${esc(r)}" type="button">${esc(r)}</button>`).join('')}</div>
         <button class="btn btn-primary btn-block" data-sh-act="move" type="button">บันทึกเงิน${c.type === 'in' ? 'เข้า' : 'ออก'}</button>
         <div class="moves">${sh.moves.slice().reverse().map((mv) => `<div class="move ${mv.type}"><span>${esc(mv.atTH.slice(11, 16))} ${esc(mv.reason || '-')} <small>${esc(mv.by || '')}</small></span><b>${mv.type === 'in' ? '+' : '−'}${money(mv.amount)}</b></div>`).join('') || '<div class="help">ยังไม่มีรายการ</div>'}</div>
-      </div>
+      </div>` : '';
+  m.querySelector('.modal-body').innerHTML = `
+    <div class="stat-grid four">
+      <div class="stat"><div class="k">เปิดกะ</div><div class="v sm">${esc(sh.openedAtTH.slice(11, 16))} น.</div><div class="s">${esc(sh.openedBy || '-')} · ${esc(sh.openedAtTH.slice(0, 10))}</div></div>
+      ${showSales
+    ? `<div class="stat"><div class="k">ยอดขายในกะ</div><div class="v">${money(x.netSales)}</div><div class="s">${x.bills} บิล${x.voids ? ` · ยกเลิก ${x.voids}` : ''}</div></div>
+      <div class="stat"><div class="k">ขายเงินสด</div><div class="v">${money(x.cashSales)}</div><div class="s">${Object.keys(x.byMethod).map((k) => `${esc(k)} ${money(x.byMethod[k])}`).join(' · ') || '-'}</div></div>`
+    : `<div class="stat"><div class="k">จำนวนบิลในกะ</div><div class="v">${x.bills}</div><div class="s">${x.voids ? `ยกเลิก ${x.voids}` : ''}</div></div>`}
+      ${showVar ? `<div class="stat primary"><div class="k">เงินสดที่ควรมีในลิ้นชัก</div><div class="v">${money(x.expected)}</div><div class="s">ตั้งต้น ${money(sh.float)} + ขาย ${money(x.cashSales)} + เข้า ${money(x.payIn)} − ออก ${money(x.payOut)}</div></div>` : ''}
+    </div>
+    <div class="shift-cols ${moveBox ? '' : 'one'}">
+      ${moveBox}
       <div class="card-box">
         <div class="section-title" style="margin-top:0">ปิดกะ — นับเงินสดในลิ้นชัก</div>
         <input class="input big-in" data-sh="counted" type="text" inputmode="decimal" placeholder="ยอดเงินสดที่นับได้จริง" value="${esc(c.counted)}" />
-        <div class="change-due ${diff != null && diff < 0 ? 'neg' : ''}" style="margin:10px 0">
-          <span>${diff == null ? 'ส่วนต่าง' : diff === 0 ? 'ตรงพอดี ✓' : diff > 0 ? 'เงินเกิน' : 'เงินขาด'}</span><b>${diff == null ? '—' : money(Math.abs(diff))}</b></div>
+        ${showVar
+    ? `<div class="change-due ${diff != null && diff < 0 ? 'neg' : ''}" style="margin:10px 0">
+          <span>${diff == null ? 'ส่วนต่าง' : diff === 0 ? 'ตรงพอดี ✓' : diff > 0 ? 'เงินเกิน' : 'เงินขาด'}</span><b>${diff == null ? '—' : money(Math.abs(diff))}</b></div>`
+    : '<p class="help" style="margin:10px 0">นับเงินให้ครบแล้วกดปิดกะ — ระบบจะเทียบกับยอดในระบบและส่งผลให้เจ้าของร้านดู</p>'}
         <input class="input" data-sh="note" type="text" placeholder="หมายเหตุ (ไม่บังคับ)" value="${esc(c.note)}" />
-        <button class="btn btn-danger btn-block" data-sh-act="close" type="button" style="margin-top:10px" ${counted == null ? 'disabled' : ''}>ปิดกะ & ส่งสรุปขึ้น Google Sheets</button>
+        <button class="btn btn-danger btn-block" data-sh-act="close" type="button" style="margin-top:10px" ${counted == null ? 'disabled' : ''}>ปิดกะ${showVar ? ' & ส่งสรุปขึ้น Google Sheets' : ''}</button>
       </div>
     </div>`;
   m.querySelector('.modal-foot').innerHTML = `<button class="btn btn-outline" data-sh-act="print" type="button">${svg('printer', 18)} พิมพ์สรุปกะ (X-Report)</button><span class="grow"></span><button class="btn btn-ghost btn-lg" data-close type="button">ปิดหน้าต่าง</button>`;
@@ -710,6 +750,7 @@ async function shiftClick(e) {
       openedAtISO: isoLocal(now), openedAtTH: fmtDateTime(now), openedBy: by, float, moves: [] };
     save.shift();
     enqueue('SHIFT_OPEN', '', shiftPayload(state.shift), `เปิดกะ ${state.shift.id}`);
+    logActivity('SHIFT_OPEN', `เปิดกะ ${state.shift.id} · เงินทอนตั้งต้น ${money(float)}`, float);
     renderHeader();
     toast(`เปิดกะแล้ว · เงินทอนตั้งต้น ${money(float)}`, 'success');
     closeModal('m-shift');
@@ -723,6 +764,7 @@ async function shiftClick(e) {
     state.shift.moves.push(mv);
     save.shift();
     enqueue('CASH_MOVE', '', mv, `${mv.type === 'in' ? 'เงินเข้า' : 'เงินออก'} ${money(amount)}`);
+    logActivity(mv.type === 'in' ? 'CASH_IN' : 'CASH_OUT', `${mv.reason || '-'}`, amount, who);
     shiftCtx.amount = '';
     shiftCtx.reason = '';
     renderShift();
@@ -731,13 +773,21 @@ async function shiftClick(e) {
   } else if (act === 'close') {
     const counted = round2(parseFloat(shiftCtx.counted) || 0);
     const x = computeShift(state.shift);
-    const diff = round2(counted - x.expected);
-    const r = await confirmDialog({ title: 'ปิดกะ', html: `<p>เงินที่ควรมี <b>${money(x.expected)}</b> · นับได้ <b>${money(counted)}</b></p><p>${diff === 0 ? 'ตรงพอดี ✓' : `${diff > 0 ? 'เงินเกิน' : 'เงินขาด'} <b>${money(Math.abs(diff))}</b>`}</p>`, okText: 'ยืนยันปิดกะ', danger: diff !== 0 });
+    const diff = fromSatang(toSatang(counted) - toSatang(x.expected));
+    const r = await confirmDialog({
+      title: 'ปิดกะ',
+      html: can('variance')
+        ? `<p>เงินที่ควรมี <b>${money(x.expected)}</b> · นับได้ <b>${money(counted)}</b></p><p>${diff === 0 ? 'ตรงพอดี ✓' : `${diff > 0 ? 'เงินเกิน' : 'เงินขาด'} <b>${money(Math.abs(diff))}</b>`}</p>`
+        : `<p>นับเงินสดได้ <b>${money(counted)}</b></p><p class="help">ยืนยันปิดกะ? หลังปิดแล้วแก้ไขไม่ได้</p>`,
+      okText: 'ยืนยันปิดกะ',
+      danger: can('variance') && diff !== 0,
+    });
     if (!r.ok) return;
     const rec = Object.assign({}, state.shift, x, { closedAtISO: isoLocal(now), closedAtTH: fmtDateTime(now), closedBy: by, counted, diff, note: shiftCtx.note.trim() });
     try { await DataDB.put('shifts', [rec]); } catch (err) { console.warn(err); }
     if (shiftHistory) shiftHistory.unshift(rec);
     enqueue('SHIFT_CLOSE', '', shiftPayload(rec), `ปิดกะ ${rec.id}`);
+    logActivity('SHIFT_CLOSE', `ปิดกะ ${rec.id} · นับได้ ${money(counted)}${can('variance') ? ` · ส่วนต่าง ${money(diff)}` : ''}`, counted);
     state.shift = null;
     save.shift();
     renderHeader();
@@ -762,17 +812,19 @@ function shiftPayload(sh) {
 
 function printShiftSummary(sh) {
   const row = (k, v) => `<div class="r-kv"><span>${esc(k)}</span><span>${esc(v)}</span></div>`;
+  const showSales = can('salesTotals');
+  const showVar = can('variance');
   printHTML(`<div class="receipt r${prefs().receipt.width}">
     <div class="r-title">${esc(state.settings.shopName)}</div>
     <div class="r-big">${sh.closedAtTH ? 'สรุปปิดกะ (Z)' : 'สรุปกะ (X)'}</div>
     ${row('กะ', sh.id)}${row('เปิด', `${sh.openedAtTH} ${sh.openedBy || ''}`)}${sh.closedAtTH ? row('ปิด', `${sh.closedAtTH} ${sh.closedBy || ''}`) : ''}
     <div class="r-hr"></div>
-    ${row('จำนวนบิล', `${sh.bills}${sh.voids ? ` (ยกเลิก ${sh.voids})` : ''}`)}${row('ยอดขายสุทธิ', fmtNum(sh.netSales))}
-    ${Object.keys(sh.byMethod || {}).map((k) => row(`  ${k}`, fmtNum(sh.byMethod[k]))).join('')}
-    <div class="r-hr"></div>
+    ${row('จำนวนบิล', `${sh.bills}${sh.voids ? ` (ยกเลิก ${sh.voids})` : ''}`)}
+    ${showSales ? `${row('ยอดขายสุทธิ', fmtNum(sh.netSales))}${Object.keys(sh.byMethod || {}).map((k) => row(`  ${k}`, fmtNum(sh.byMethod[k]))).join('')}` : ''}
+    ${showVar ? `<div class="r-hr"></div>
     ${row('เงินทอนตั้งต้น', fmtNum(sh.float))}${row('ขายเงินสด', fmtNum(sh.cashSales))}${row('เงินเข้า', fmtNum(sh.payIn))}${row('เงินออก', fmtNum(sh.payOut))}
     <div class="r-kv r-total"><span>ควรมีในลิ้นชัก</span><span>${fmtNum(sh.expected)}</span></div>
-    ${sh.counted != null ? row('นับได้จริง', fmtNum(sh.counted)) + row('ส่วนต่าง', fmtNum(sh.diff)) : ''}
+    ${sh.counted != null ? row('นับได้จริง', fmtNum(sh.counted)) + row('ส่วนต่าง', fmtNum(sh.diff)) : ''}` : (sh.counted != null ? `<div class="r-hr"></div>${row('นับเงินสดได้', fmtNum(sh.counted))}` : '')}
     ${(sh.moves || []).length ? `<div class="r-hr"></div>${sh.moves.map((m) => row(`${m.atTH.slice(11, 16)} ${m.reason || ''}`, `${m.type === 'in' ? '+' : '-'}${fmtNum(m.amount)}`)).join('')}` : ''}
     ${sh.note ? `<div class="r-sub">หมายเหตุ: ${esc(sh.note)}</div>` : ''}
   </div>`);
@@ -786,21 +838,24 @@ function shiftHistoryHTML() {
   }
   const sh = state.shift;
   const cur = sh ? computeShift(sh) : null;
+  const showSales = can('salesTotals');
+  const showVar = can('variance');
   return `
     <div class="row" style="margin-bottom:12px">
-      ${sh ? `<div class="ok-box grow" style="margin:0">กะปัจจุบันเปิดตั้งแต่ ${esc(sh.openedAtTH)} โดย ${esc(sh.openedBy || '-')} · ยอดขาย ${money(cur.netSales)} · เงินสดที่ควรมี ${money(cur.expected)}</div>`
+      ${sh ? `<div class="ok-box grow" style="margin:0">กะปัจจุบันเปิดตั้งแต่ ${esc(sh.openedAtTH)} โดย ${esc(sh.openedBy || '-')} · ${cur.bills} บิล${showSales ? ` · ยอดขาย ${money(cur.netSales)}` : ''}${showVar ? ` · เงินสดที่ควรมี ${money(cur.expected)}` : ''}</div>`
     : '<div class="warn-box grow" style="margin:0">ยังไม่ได้เปิดกะ</div>'}
-      <button class="btn btn-primary" data-shh="panel" type="button">${svg('cash', 18)} ${sh ? 'เงินเข้า-ออก / ปิดกะ' : 'เปิดกะ'}</button>
+      <button class="btn btn-primary" data-shh="panel" type="button">${svg('cash', 18)} ${sh ? (can('cashMove') ? 'เงินเข้า-ออก / ปิดกะ' : 'ปิดกะ') : 'เปิดกะ'}</button>
     </div>
     ${shiftHistory.length ? `<div class="tbl-wrap"><table class="tbl">
-      <thead><tr><th>กะ</th><th>เปิด</th><th>ปิด</th><th class="num">บิล</th><th class="num">ยอดขาย</th><th class="num">เงินสดควรมี</th><th class="num">นับได้</th><th class="num">ส่วนต่าง</th><th></th></tr></thead>
+      <thead><tr><th>กะ</th><th>เปิด</th><th>ปิด</th><th class="num">บิล</th>${showSales ? '<th class="num">ยอดขาย</th>' : ''}${showVar ? '<th class="num">เงินสดควรมี</th><th class="num">นับได้</th><th class="num">ส่วนต่าง</th>' : ''}<th></th></tr></thead>
       <tbody>${shiftHistory.slice(0, 120).map((s) => `<tr>
-        <td class="oid">${esc(s.id)}</td><td>${esc(s.openedAtTH)}<div class="help" style="margin:0">${esc(s.openedBy || '')}</div></td>
+        <td class="oid">${esc(s.id)}${s.remote ? `<div class="help" style="margin:0">${esc(s.device || 'Cloud')}</div>` : ''}</td><td>${esc(s.openedAtTH)}<div class="help" style="margin:0">${esc(s.openedBy || '')}</div></td>
         <td>${esc(s.closedAtTH)}<div class="help" style="margin:0">${esc(s.closedBy || '')}</div></td>
-        <td class="num">${s.bills}</td><td class="num">${money(s.netSales)}</td><td class="num">${money(s.expected)}</td><td class="num">${money(s.counted)}</td>
-        <td class="num" style="color:${s.diff < 0 ? 'var(--danger)' : s.diff > 0 ? 'var(--warn)' : 'var(--ok)'}"><b>${s.diff > 0 ? '+' : ''}${fmtNum(s.diff)}</b></td>
+        <td class="num">${s.bills}</td>${showSales ? `<td class="num">${money(s.netSales)}</td>` : ''}
+        ${showVar ? `<td class="num">${money(s.expected)}</td><td class="num">${money(s.counted)}</td>
+        <td class="num" style="color:${s.diff < 0 ? 'var(--danger)' : s.diff > 0 ? 'var(--warn)' : 'var(--ok)'}"><b>${s.diff > 0 ? '+' : ''}${fmtNum(s.diff)}</b></td>` : ''}
         <td><button class="btn btn-outline btn-sm" data-shh="print" data-id="${esc(s.id)}" type="button">${svg('printer', 16)}</button></td></tr>`).join('')}</tbody>
-    </table></div>` : `<div class="empty-state">${svg('cash', 40)}<p>ยังไม่มีประวัติการปิดกะในเครื่องนี้</p></div>`}`;
+    </table></div>` : `<div class="empty-state">${svg('cash', 40)}<p>ยังไม่มีประวัติการปิดกะ</p></div>`}`;
 }
 function shiftHistoryClick(e) {
   const b = e.target.closest('[data-shh]');
@@ -934,6 +989,7 @@ function logStock(pool, before, after, reasonId, note, who) {
   DataDB.put('stocklog', [e]).catch((err) => console.warn('stock log save failed', err));
   if (stockLogCache) stockLogCache.unshift(e);
   enqueue('STOCK_LOG', '', e, `${e.poolName} ${delta > 0 ? '+' : ''}${delta} (${e.reasonLabel})`);
+  logActivity('STOCK', `${e.poolName} ${delta > 0 ? '+' : ''}${fmtNum(delta)} ${e.unit} (${e.reasonLabel})${note ? ` · ${note}` : ''}`, 0, who);
 }
 
 let adjCtx = null;
@@ -1254,7 +1310,7 @@ function reportDataLocal(from, to) {
   for (const o of state.orders) {
     if (o.date < from || o.date > to) continue;
     const hour = Number((o.createdAtISO || '').slice(11, 13)) || 0;
-    bills.push({ id: o.id, date: o.date, hour, net: o.net, cost: o.totalCost || 0, method: o.payment.label, staff: (o.staff && o.staff.name) || '-', status: o.status, discount: o.totalDiscount || 0 });
+    bills.push({ id: o.id, date: o.date, hour, net: o.net, cost: o.totalCost || 0, method: o.payment.label, staff: (o.staff && o.staff.name) || '-', status: o.status, discount: o.totalDiscount || 0, device: o.device || '' });
     if (o.status === 'VOIDED') continue;
     for (const i of o.items || []) items.push({ name: i.name, cat: i.category || '', qty: i.type === 'weight' ? 1 : i.qty, grams: i.type === 'weight' ? (i.soldG || 0) : 0, net: round2(i.net - (i.promoDiscount || 0)), cost: i.cost || 0 });
   }
@@ -1272,13 +1328,15 @@ async function loadReportRemote() {
   rep.error = '';
   renderHistory();
   try {
-    const res = await postToSheet(url, { source: 'ipad-pos', device: state.settings.devicePrefix, actions: [{ qid: 'report', action: 'PULL_REPORT', data: { from, to } }] }, { needResponse: true, timeout: 45000 });
+    const res = await postToSheet(url, { source: 'ipad-pos', device: state.settings.devicePrefix, actions: [{ qid: 'report', action: 'PULL_REPORT', data: { from, to } }, { qid: 'acts', action: 'PULL_ACTIVITY', data: { from, to } }] }, { needResponse: true, timeout: 45000 });
     const r = res.results && res.results[0];
+    const ra = res.results && res.results[1];
     if (!r || !r.ok) throw new Error((r && r.error) || 'PULL_REPORT failed');
     rep.remote = {
-      bills: (r.result.bills || []).map((b) => ({ id: String(b.id), date: String(b.date), hour: toInt(b.hour), net: num(b.net), cost: num(b.cost), method: String(b.method || '-'), staff: String(b.staff || '-'), status: b.status === 'VOIDED' ? 'VOIDED' : 'COMPLETED', discount: num(b.discount) })),
+      bills: (r.result.bills || []).map((b) => ({ id: String(b.id), date: String(b.date), hour: toInt(b.hour), net: num(b.net), cost: num(b.cost), method: String(b.method || '-'), staff: String(b.staff || '-'), status: b.status === 'VOIDED' ? 'VOIDED' : 'COMPLETED', discount: num(b.discount), device: String(b.device || '') })),
       items: (r.result.items || []).map((i) => ({ name: String(i.name), cat: String(i.cat || ''), qty: num(i.qty), grams: num(i.grams), net: num(i.net), cost: num(i.cost) })),
       truncated: !!r.result.truncated,
+      acts: ra && ra.ok ? (ra.result.rows || []).map(normalizeActivity) : [],
     };
     rep.remoteKey = key;
   } catch (e) {
@@ -1355,6 +1413,7 @@ function reportHTML() {
       <div class="stat"><div class="k">กำไรขั้นต้น</div><div class="v" style="color:${profit < 0 ? 'var(--danger)' : 'var(--ok)'}">${hasCost ? money(profit) : '—'}</div><div class="s">${hasCost && sales ? `มาร์จิ้น ${Math.round((profit / sales) * 100)}%` : ''}</div></div>
       <div class="stat"><div class="k">ส่วนลดที่ให้ไป</div><div class="v">${money(disc)}</div><div class="s">${data.bills.length - done.length ? `ยกเลิก ${data.bills.length - done.length} บิล` : ''}</div></div>
     </div>
+    ${staffDashHTML(data, from, to)}
     <div class="report-grid">
       <div class="card-box"><div class="section-title" style="margin-top:0">🏆 เมนูขายดี (ตามยอดขาย)</div>
         ${items.length ? `<div class="tbl-wrap"><table class="tbl" style="min-width:0"><thead><tr><th>#</th><th>เมนู</th><th class="num">จำนวน</th><th class="num">ยอดขาย</th>${hasCost ? '<th class="num">กำไร</th>' : ''}</tr></thead>
@@ -1374,10 +1433,338 @@ function reportHTML() {
 function reportClick(e) {
   const b = e.target.closest('[data-rep]');
   if (!b) return;
-  if (b.dataset.rep === 'days') rep.days = Number(b.dataset.v);
-  if (b.dataset.rep === 'scope') rep.scope = b.dataset.v;
+  const k = b.dataset.rep;
+  if (k === 'send') return sendStaffSummary();
+  if (k === 'days') rep.days = Number(b.dataset.v);
+  if (k === 'scope') rep.scope = b.dataset.v;
+  if (k === 'staff') { rep.staff = b.dataset.v; return renderHistory(); }
   rep.error = '';
   renderHistory();
   loadReportRemote();
 }
 function reportChange() { /* report tab has no select inputs */ }
+
+
+/* ==========================================================================
+   12. ACTIVITY LOG  +  OWNER DASHBOARD PER ACCOUNT
+   ========================================================================== */
+rep.staff = 'all';
+let actCache = null;
+const actThrottle = {};
+const ACT_LABEL = {
+  LOGIN: '🔑 เข้าสู่ระบบ', LOGOUT: '🚪 ออกจากระบบ', SALE: '🧾 ขาย', VOID: '❌ ยกเลิกบิล', PARK: '⏸ พักบิล',
+  SHIFT_OPEN: '🟢 เปิดกะ', SHIFT_CLOSE: '🔴 ปิดกะ', CASH_IN: '➕ เงินเข้า', CASH_OUT: '➖ เงินออก',
+  STOCK: '📦 ปรับสต็อก', EDIT: '✏️ แก้ไขเมนู/ตั้งค่า', ACCESS: '🛠 เข้าหน้าจัดการ',
+};
+
+/** Every important action of every account → local IndexedDB + Activity_Log sheet (only when staff accounts are in use). */
+function logActivity(type, detail, amount = 0, by = null, opt = {}) {
+  if (!staffMode()) return;
+  const s = state.session;
+  const who = by || (s ? { id: s.staffId, name: s.name } : null);
+  if (!who) return;
+  if (opt.throttle) {
+    const k = `${type}|${who.id}`;
+    if (actThrottle[k] && Date.now() - actThrottle[k] < opt.throttle) return;
+    actThrottle[k] = Date.now();
+  }
+  const now = new Date();
+  const e = {
+    id: `AL-${state.settings.devicePrefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`,
+    atISO: isoLocal(now), atTH: fmtDateTime(now), date: dateKey(now), hour: now.getHours(), device: state.settings.devicePrefix,
+    staffId: who.id || '', staff: who.name || '', type, detail: String(detail || '').slice(0, 300), amount: round2(amount),
+    shiftId: state.shift ? state.shift.id : '',
+  };
+  DataDB.put('activity', [e]).catch((err) => console.warn('activity save failed', err));
+  if (actCache) actCache.unshift(e);
+  enqueue('ACTIVITY_LOG', '', e, `${type} ${e.detail}`.slice(0, 60));
+}
+
+async function loadActivity() {
+  if (actCache) return actCache;
+  try { actCache = (await DataDB.all('activity')).sort((a, b) => (a.atISO < b.atISO ? 1 : -1)); } catch (e) { actCache = []; }
+  return actCache;
+}
+
+const thToISO = (v) => {
+  const m = String(v || '').match(/^(\d{2})\/(\d{2})\/(\d{4})[ T](\d{2}):(\d{2}):(\d{2})/);
+  return m ? `${m[3]}-${m[2]}-${m[1]}T${m[4]}:${m[5]}:${m[6]}` : String(v || '');
+};
+
+function normalizeActivity(r) {
+  const atTH = String(r.Date_Time || r.atTH || '');
+  return {
+    id: String(r.Log_ID || r.id), atTH, atISO: thToISO(atTH) || String(r.atISO || ''), date: String(r.Date || r.date || ''),
+    hour: toInt(r.Hour != null && r.Hour !== '' ? r.Hour : r.hour), device: String(r.Device || r.device || ''),
+    staffId: String(r.Staff_ID || r.staffId || ''), staff: String(r.Staff || r.staff || ''), type: String(r.Type || r.type || ''),
+    detail: String(r.Detail || r.detail || ''), amount: num(r.Amount != null ? r.Amount : r.amount), shiftId: String(r.Shift_ID || r.shiftId || ''),
+  };
+}
+
+function staffStats(bills, acts, name) {
+  const mine = bills.filter((b) => b.staff === name);
+  const done = mine.filter((b) => b.status !== 'VOIDED');
+  const myActs = acts.filter((a) => a.staff === name);
+  const hours = {};
+  for (const b of done) { const h = hours[b.hour] || (hours[b.hour] = { n: 0, v: 0 }); h.n++; h.v = fromSatang(toSatang(h.v) + toSatang(b.net)); }
+  const hk = Object.keys(hours).map(Number);
+  const times = myActs.map((a) => a.atISO).filter(Boolean).sort();
+  return {
+    name, bills: done.length, sales: sumMoney(done, (b) => b.net), discount: sumMoney(done, (b) => b.discount),
+    voidBills: mine.length - done.length, voidsDone: myActs.filter((a) => a.type === 'VOID').length,
+    avg: done.length ? round2(sumMoney(done, (b) => b.net) / done.length) : 0,
+    first: times[0] || '', last: times[times.length - 1] || '', hours,
+    peak: hk.length ? hk.reduce((a, b) => (hours[b].v > hours[a].v ? b : a)) : null,
+  };
+}
+
+function staffDashHTML(data, from, to) {
+  const remote = rep.scope === 'all' && rep.remote && rep.remoteKey === `${from}|${to}`;
+  if (!actCache) loadActivity().then(() => { if (isOpen('m-history') && histTab === 'report') renderHistory(); });
+  const acts = (remote ? rep.remote.acts : (actCache || [])).filter((a) => a.date >= from && a.date <= to);
+  const names = [...new Set([...data.bills.map((b) => b.staff), ...acts.map((a) => a.staff)].filter((n) => n && n !== '-'))].sort();
+  if (!names.length) {
+    return `<div class="card-box staff-dash"><div class="section-title" style="margin-top:0">👥 รายบัญชีพนักงาน</div>
+      <div class="help">ยังไม่มีข้อมูลรายบัญชี — เพิ่มพนักงานที่ ตั้งค่า ▸ พนักงาน & สิทธิ์ แล้วทุกการขาย/ยกเลิก/ปรับสต็อก/เปิด-ปิดกะ จะถูกบันทึกแยกตามบัญชี</div></div>`;
+  }
+  if (rep.staff !== 'all' && !names.includes(rep.staff)) rep.staff = 'all';
+  const hh = (iso) => (iso ? iso.slice(11, 16) : '-');
+  const chips = ['all', ...names].map((n) => `<button class="fchip ${rep.staff === n ? 'on' : ''}" data-rep="staff" data-v="${esc(n)}" type="button">${n === 'all' ? 'ทุกคน' : esc(n)}</button>`).join('');
+  let body = '';
+  if (rep.staff === 'all') {
+    const rows = names.map((n) => staffStats(data.bills, acts, n)).sort((a, b) => b.sales - a.sales);
+    body = `<div class="tbl-wrap"><table class="tbl" style="min-width:640px"><thead><tr><th>บัญชี</th><th class="num">บิล</th><th class="num">ยอดขาย</th><th class="num">เฉลี่ย/บิล</th><th class="num">ส่วนลด</th><th class="num">ยกเลิก (ที่กด)</th><th>ช่วงที่ใช้งาน</th><th>ขายดีช่วง</th></tr></thead>
+      <tbody>${rows.map((r) => `<tr><td><button class="btn-text" data-rep="staff" data-v="${esc(r.name)}" type="button"><b>${esc(r.name)}</b></button></td>
+        <td class="num">${r.bills}</td><td class="num"><b>${money(r.sales)}</b></td><td class="num">${money(r.avg)}</td><td class="num">${money(r.discount)}</td>
+        <td class="num">${r.voidsDone}</td><td>${hh(r.first)} – ${hh(r.last)}</td><td>${r.peak == null ? '-' : `${pad(r.peak)}:00`}</td></tr>`).join('')}</tbody></table></div>`;
+  } else {
+    const r = staffStats(data.bills, acts, rep.staff);
+    const hk = Object.keys(r.hours).map(Number);
+    const hMin = hk.length ? Math.min(...hk) : 0;
+    const hourRows = hk.length ? Array.from({ length: Math.max(...hk) - hMin + 1 }, (_, i) => hMin + i).map((h) => ({ k: `${pad(h)}:00`, v: r.hours[h] ? r.hours[h].v : 0, s: r.hours[h] ? ` ${r.hours[h].n} บิล` : '' })) : [];
+    const list = acts.filter((a) => a.staff === rep.staff).sort((a, b) => (a.atISO < b.atISO ? 1 : -1)).slice(0, 150);
+    body = `
+      <div class="stat-grid four">
+        <div class="stat primary"><div class="k">ยอดขาย</div><div class="v">${money(r.sales)}</div><div class="s">${r.bills} บิล · เฉลี่ย ${money(r.avg)}</div></div>
+        <div class="stat"><div class="k">ส่วนลดที่ให้</div><div class="v">${money(r.discount)}</div></div>
+        <div class="stat"><div class="k">ยกเลิกบิล</div><div class="v">${r.voidsDone}</div><div class="s">บิลของบัญชีนี้ที่ถูกยกเลิก ${r.voidBills}</div></div>
+        <div class="stat"><div class="k">ช่วงที่ใช้งาน</div><div class="v sm">${hh(r.first)} – ${hh(r.last)}</div><div class="s">${r.peak == null ? '' : `ขายดีสุด ${pad(r.peak)}:00`}</div></div>
+      </div>
+      <div class="report-grid">
+        <div class="card-box"><div class="section-title" style="margin-top:0">⏰ ยอดขายรายชั่วโมง — ${esc(r.name)}</div>${hourRows.length ? bars(hourRows) : '<div class="help">ไม่มีข้อมูลการขาย</div>'}</div>
+        <div class="card-box"><div class="section-title" style="margin-top:0">🕒 ทำอะไรบ้าง (ล่าสุด ${list.length} รายการ)</div>
+          ${list.length ? `<div class="tbl-wrap" style="max-height:340px;overflow:auto"><table class="tbl" style="min-width:0"><thead><tr><th>เวลา</th><th>ทำอะไร</th><th>รายละเอียด</th><th class="num">บาท</th></tr></thead>
+          <tbody>${list.map((a) => `<tr><td class="nowrap">${esc(a.date.slice(5))} ${esc(a.atISO.slice(11, 16))}</td><td class="nowrap">${esc(ACT_LABEL[a.type] || a.type)}</td><td>${esc(a.detail)}</td><td class="num">${a.amount ? money(a.amount) : ''}</td></tr>`).join('')}</tbody></table></div>` : '<div class="help">ไม่มีกิจกรรมในช่วงนี้</div>'}</div>
+      </div>`;
+  }
+  return `<div class="card-box staff-dash"><div class="row" style="margin-bottom:8px">
+      <div class="section-title grow" style="margin:0">👥 รายบัญชีพนักงาน</div>
+      <button class="btn btn-outline btn-sm" data-rep="send" type="button">${svg('cloud', 16)} ส่งสรุปรายบัญชีขึ้น Google Sheets</button></div>
+    <div class="chips" style="margin-bottom:10px">${chips}</div>${body}</div>`;
+}
+
+/** One row per day × account × device → sheet Staff_Summary (upserted by key — sending twice never duplicates). */
+function sendStaffSummary() {
+  const { from, to } = reportRange();
+  const remote = rep.scope === 'all' && rep.remote && rep.remoteKey === `${from}|${to}`;
+  const data = remote ? rep.remote : reportDataLocal(from, to);
+  const groups = {};
+  for (const b of data.bills) {
+    if (!b.staff || b.staff === '-') continue;
+    const k = `${b.date}|${b.staff}|${b.device || ''}`;
+    (groups[k] || (groups[k] = [])).push(b);
+  }
+  const acts = (remote ? rep.remote.acts : (actCache || []));
+  const rows = Object.keys(groups).map((k) => {
+    const [date, staff, device] = k.split('|');
+    const all = groups[k];
+    const done = all.filter((b) => b.status !== 'VOIDED');
+    const hours = {};
+    for (const b of done) hours[b.hour] = fromSatang(toSatang(hours[b.hour] || 0) + toSatang(b.net));
+    const hk = Object.keys(hours).map(Number);
+    const mine = acts.filter((a) => a.date === date && a.staff === staff && (!device || a.device === device)).map((a) => a.atISO).filter(Boolean).sort();
+    return {
+      key: k, date, staff, device, bills: done.length, sales: sumMoney(done, (b) => b.net), voids: all.length - done.length,
+      voidAmount: sumMoney(all.filter((b) => b.status === 'VOIDED'), (b) => b.net), discount: sumMoney(done, (b) => b.discount),
+      avg: done.length ? round2(sumMoney(done, (b) => b.net) / done.length) : 0,
+      first: mine[0] || '', last: mine[mine.length - 1] || '',
+      peakHour: hk.length ? hk.reduce((a, b) => (hours[b] > hours[a] ? b : a)) : '', hourly: JSON.stringify(hours),
+    };
+  });
+  if (!rows.length) return toast('ยังไม่มีข้อมูลรายบัญชีในช่วงนี้', 'warn');
+  for (let i = 0; i < rows.length; i += 100) enqueue('STAFF_SUMMARY', '', { rows: rows.slice(i, i + 100) }, `สรุปรายบัญชี ${rows.length} แถว`);
+  toast(`ส่งสรุปรายบัญชี ${rows.length} แถวเข้าคิวแล้ว — ดูที่ชีต Staff_Summary`, 'success', 3500);
+  syncNow({ silent: true });
+}
+
+/* ==========================================================================
+   13. TWO-WAY LIVE SYNC  (stock · shifts · cash moves · stock log · activity)  +  KITCHEN QUEUE COUNTER
+   ========================================================================== */
+const live = { busy: false, timer: null, kTimer: null, kBusy: false, ids: null, kitchen: { known: false, list: [], error: false } };
+
+function startLiveSync() {
+  clearInterval(live.timer);
+  live.timer = setInterval(livePull, 20000);
+  setTimeout(livePull, 4000);
+  setInterval(renderKitchenChip, 30000);
+  window.addEventListener('online', () => { livePull(); kitchenPoll(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { livePull(); kitchenPoll(); } });
+  kitchenPoll();
+}
+
+async function ledgerIds() {
+  if (live.ids) return live.ids;
+  const ids = {};
+  for (const st of ['shifts', 'stocklog', 'activity']) {
+    try { ids[st] = new Set((await DataDB.all(st)).map((x) => x.id)); } catch (e) { ids[st] = new Set(); }
+  }
+  live.ids = ids;
+  return ids;
+}
+
+/** Merge shifts / stock log / activity written by the other iPads. Keyed by id → never duplicates. */
+async function applyPulledLedger(l) {
+  if (!l) return false;
+  const ids = await ledgerIds();
+  const add = { shifts: [], stocklog: [], activity: [] };
+  const movesByShift = {};
+  for (const m of l.moves || []) {
+    (movesByShift[m.Shift_ID] || (movesByShift[m.Shift_ID] = [])).push({
+      id: String(m.Move_ID), atTH: String(m.Date_Time || ''), type: m.Type === 'PAY_IN' ? 'in' : 'out', amount: num(m.Amount), reason: String(m.Reason || ''), by: String(m.By || ''),
+    });
+  }
+  for (const r of l.shifts || []) {
+    const id = String(r.Shift_ID);
+    if (String(r.Status) !== 'CLOSED' || ids.shifts.has(id) || (state.shift && state.shift.id === id)) continue;
+    add.shifts.push({
+      id, remote: true, device: String(r.Device || ''), openedAtTH: String(r.Opened_At || ''), openedBy: String(r.Opened_By || ''), float: num(r.Opening_Float),
+      closedAtTH: String(r.Closed_At || ''), closedAtISO: thToISO(r.Closed_At), closedBy: String(r.Closed_By || ''),
+      bills: num(r.Bills), voids: num(r.Voids), netSales: num(r.Net_Sales), cashSales: num(r.Cash_Sales), payIn: num(r.Pay_In), payOut: num(r.Pay_Out),
+      expected: num(r.Expected_Cash), counted: num(r.Counted_Cash), diff: num(r.Difference), note: String(r.Note || ''), moves: movesByShift[id] || [], byMethod: {},
+    });
+  }
+  for (const r of l.stocklog || []) {
+    const id = String(r.Log_ID);
+    if (ids.stocklog.has(id)) continue;
+    add.stocklog.push({
+      id, atTH: String(r.Date_Time || ''), atISO: thToISO(r.Date_Time), date: String(r.Date || ''), device: String(r.Device || ''), pool: String(r.Pool_ID || ''),
+      poolName: String(r.Pool_Name || ''), unit: String(r.Unit || ''), delta: num(r.Change), before: num(r.Before), after: num(r.After), reason: String(r.Reason_ID || ''),
+      reasonLabel: String(r.Reason || ''), note: String(r.Note || ''), staff: String(r.Staff || ''), costValue: num(r.Cost_Value),
+    });
+  }
+  for (const r of l.activity || []) {
+    const e = normalizeActivity(r);
+    if (e.id && !ids.activity.has(e.id)) add.activity.push(e);
+  }
+  let changed = false;
+  for (const st of Object.keys(add)) {
+    if (!add[st].length) continue;
+    await DataDB.put(st, add[st]);
+    add[st].forEach((x) => ids[st].add(x.id));
+    changed = true;
+  }
+  if (!changed) return false;
+  if (add.shifts.length) shiftHistory = null;
+  if (add.stocklog.length) stockLogCache = null;
+  if (add.activity.length) actCache = null;
+  if (isOpen('m-history')) renderHistory();
+  if (isOpen('m-manage') && mgr.tab === 'log') renderManager();
+  return true;
+}
+
+/** Every ~20 s: send what is queued, then take the cloud stock + other iPads' shifts / cash moves / stock log. */
+async function livePull() {
+  const url = (state.settings.gasUrl || '').trim();
+  if (live.busy || !url || !navigator.onLine || document.visibilityState !== 'visible') return;
+  if (state.syncing || state.cloudBusy || isOpen('m-pay') || isOpen('m-weight') || isOpen('m-set')) return;
+  live.busy = true;
+  try {
+    if (state.queue.length) await syncNow({ silent: true });
+    if (state.authExpired) return;
+    const res = await postToSheet(url, { source: 'ipad-pos', device: state.settings.devicePrefix, actions: [{ qid: 'live', action: 'PULL_LIVE', data: {} }] }, { needResponse: true, timeout: 25000 });
+    const r = res.results && res.results[0];
+    if (!r || !r.ok) throw new Error((r && r.error) || 'PULL_LIVE failed');
+    if (r.result.stock && typeof r.result.stock === 'object') {
+      const before = JSON.stringify(state.stock);
+      const next = mergeServerStock(r.result.stock);
+      if (JSON.stringify(next) !== before) {
+        state.stock = next;
+        save.stock();
+        renderMenu();
+        renderCart();
+        const typing = document.activeElement && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
+        if (isOpen('m-manage') && !typing) renderManager();
+      }
+    }
+    await applyPulledLedger(r.result.ledger);
+  } catch (e) {
+    if (!(e && e.auth)) console.warn('[live]', e && e.message);
+  } finally {
+    live.busy = false;
+  }
+}
+
+/* ---------- kitchen counter (POS header) ---------- */
+async function kitchenPoll() {
+  clearTimeout(live.kTimer);
+  const next = () => { live.kTimer = setTimeout(kitchenPoll, Math.max(10, prefs().kds.pollSec * 2) * 1000); };
+  const url = (state.settings.gasUrl || '').trim();
+  if (!url || state.settings.deviceMode === 'kds') { renderKitchenChip(); return; }
+  if (live.kBusy || document.visibilityState !== 'visible' || !navigator.onLine || state.authExpired) { renderKitchenChip(); return next(); }
+  live.kBusy = true;
+  try {
+    const sep = url.includes('?') ? '&' : '?';
+    const res = await cloudFetch(`${url}${sep}action=PULL_KITCHEN_QUEUE&hours=1&_=${Date.now()}`, { method: 'GET' }, 12000);
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.error || 'kitchen');
+    live.kitchen = { known: true, error: false, list: (json.result.orders || []).filter((o) => o.status === 'PENDING').map((o) => {
+      let k = o.items; if (typeof k === 'string') { try { k = JSON.parse(k); } catch (e) { k = {}; } }
+      return { id: String(o.id), q: String(o.q || (k && k.q) || ''), t: String((k && k.t) || o.createdISO || ''), items: (k && k.items) || [], note: (k && k.note) || '' };
+    }) };
+  } catch (e) {
+    live.kitchen.error = true;
+  } finally {
+    live.kBusy = false;
+    renderKitchenChip();
+    next();
+  }
+}
+
+/** Queue = PENDING on the cloud + bills of this iPad that are not uploaded yet (the kitchen cannot see those). */
+function kitchenQueue() {
+  const list = live.kitchen.list.slice();
+  const have = new Set(list.map((x) => x.id));
+  for (const o of state.orders) {
+    if (o.status === 'VOIDED' || o.kitchenStatus !== 'PENDING' || o.synced || have.has(o.id) || o.date !== todayKey()) continue;
+    list.push({ id: o.id, q: o.queueNo, t: o.createdAtISO, items: (o.kitchen && o.kitchen.items) || [], note: o.note || '', local: true });
+  }
+  return list.sort((a, b) => (a.t < b.t ? -1 : 1));
+}
+
+function renderKitchenChip() {
+  const b = $('#kitchenChip');
+  if (!b) return;
+  const show = !!(state.settings.gasUrl || '').trim() && state.settings.deviceMode !== 'kds';
+  b.hidden = !show;
+  if (!show) return;
+  const list = kitchenQueue();
+  const k = prefs().kds;
+  const oldest = list.length ? Math.max(0, Math.floor((Date.now() - new Date(list[0].t).getTime()) / 60000)) : 0;
+  const cls = live.kitchen.error && !live.kitchen.known ? 'bad' : !list.length ? '' : oldest >= k.lateMin ? 'late' : oldest >= k.warnMin ? 'warn' : 'busy';
+  b.className = `hbtn kitchen-chip ${cls}`;
+  b.innerHTML = `${svg('chef', 18)}<span class="kc-n">${live.kitchen.known || list.length ? list.length : '–'}</span><span class="lbl-long">${list.length ? `คิวหลังร้านรอทำ${oldest ? ` · นานสุด ${oldest} น.` : ''}` : (live.kitchen.error && !live.kitchen.known ? 'ดูคิวหลังร้านไม่ได้' : 'หลังร้านว่าง')}</span>`;
+  b.title = live.kitchen.error ? 'เชื่อมต่อไม่ได้ — แสดงตัวเลขล่าสุด' : 'กดเพื่อดูคิวที่ค้างอยู่หลังร้าน';
+}
+
+function openKitchenList() {
+  const m = ensureModal('m-kq', { size: 'lg', title: 'คิวหลังร้านที่ยังรอทำ' });
+  const list = kitchenQueue();
+  m.querySelector('.modal-body').innerHTML = list.length ? list.map((o) => {
+    const mins = Math.max(0, Math.floor((Date.now() - new Date(o.t).getTime()) / 60000));
+    return `<div class="mgr-row"><span class="qno">#${esc(o.q)}</span>
+      <div class="grow">${(o.items || []).map((i) => `${esc(i.n)} ${esc(i.q)}`).join(' · ') || '-'}${o.note ? `<div class="cl-note-inline">📝 ${esc(o.note)}</div>` : ''}${o.local ? '<div class="help" style="margin:0">ยังไม่ได้ส่งขึ้น Cloud</div>' : ''}</div>
+      <b class="nowrap">${mins} นาที</b></div>`;
+  }).join('') : `<div class="empty-state">${svg('chef', 40)}<p>ไม่มีออเดอร์ค้างหลังร้าน</p></div>`;
+  m.querySelector('.modal-foot').innerHTML = '<button class="btn btn-ghost" data-close type="button">ปิด</button>';
+  openModal('m-kq');
+}

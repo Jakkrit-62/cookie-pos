@@ -51,6 +51,8 @@ const SHEET_SHIFTS = 'Shifts';
 const SHEET_MOVES = 'Cash_Moves';
 const SHEET_STOCKLOG = 'Stock_Log';
 const SHEET_CUSTOMERS = 'Customers';
+const SHEET_ACTIVITY = 'Activity_Log';
+const SHEET_STAFFSUM = 'Staff_Summary';
 const KITCHEN_SCAN_ROWS = 400;   // KDS only looks at the newest N bills
 
 const ORDER_HEADERS = [
@@ -62,6 +64,8 @@ const ORDER_HEADERS = [
   'Queue_No', 'Order_Note', 'Kitchen_Status', 'Kitchen_Items', 'Kitchen_Updated_At',
   'Staff', 'Customer_Phone', 'Customer_Name', 'Points_Earned', 'Points_Redeemed', 'Points_Discount',
   'Total_Cost', 'Shift_ID', 'Manual_By', 'Voided_By',
+  // v4
+  'Cash_In_Drawer',
 ];
 const ITEM_HEADERS = [
   'Order_ID', 'Line_No', 'Status', 'Date', 'Date_Time', 'Category', 'Menu_ID', 'Menu', 'Detail',
@@ -82,6 +86,11 @@ const MOVE_HEADERS = ['Move_ID', 'Shift_ID', 'Date_Time', 'Type', 'Amount', 'Rea
 const STOCKLOG_HEADERS = [
   'Log_ID', 'Date', 'Date_Time', 'Device', 'Pool_ID', 'Pool_Name', 'Unit', 'Change', 'Before', 'After',
   'Reason_ID', 'Reason', 'Note', 'Staff', 'Cost_Value', 'Synced_At',
+];
+const ACTIVITY_HEADERS = ['Log_ID', 'Date', 'Date_Time', 'Hour', 'Device', 'Staff_ID', 'Staff', 'Type', 'Detail', 'Amount', 'Shift_ID', 'Synced_At'];
+const STAFFSUM_HEADERS = [
+  'Key', 'Date', 'Staff', 'Device', 'Bills', 'Sales', 'Voids', 'Void_Amount', 'Discount', 'Avg_Per_Bill',
+  'First_Action', 'Last_Action', 'Peak_Hour', 'Hourly_Sales', 'Updated_At',
 ];
 const CUSTOMER_HEADERS = ['Phone', 'Name', 'Points', 'Visits', 'Total_Spent', 'First_Visit', 'Last_Visit', 'Updated_At'];
 
@@ -186,6 +195,10 @@ function handleAction_(a, sh, bodyDevice) {
   if (type === 'KITCHEN_STATUS' || type === 'UPDATE_KITCHEN_STATUS') return kitchenStatus_(data, sh);
   if (type === 'PULL_CUSTOMER') return customerByPhone_(sh.customers, data.phone);
   if (type === 'PULL_REPORT') return pullReport_(data, sh);
+  if (type === 'ACTIVITY_LOG') return activityLog_(data, sh);
+  if (type === 'STAFF_SUMMARY') return staffSummary_(data, sh);
+  if (type === 'PULL_ACTIVITY') return pullActivity_(data, sh);
+  if (type === 'PULL_LIVE') return pullLive_(sh);
   if (type === 'PULL_KITCHEN' || type === 'PULL_KITCHEN_QUEUE') return pullKitchen_(sh.orders, Number(data.hours) || 3);
   throw new Error('Unknown action: ' + a.action);
 }
@@ -371,12 +384,85 @@ function cashMove_(d, sh) {
 function stockLog_(d, sh) {
   if (!d.id) throw new Error('Missing log id');
   if (findRow_(sh.stocklog, d.id)) return 'duplicate';
+  // The adjustment is a DELTA applied to the shared cloud stock — a sale made on another iPad is never overwritten.
+  if (d.pool && num_(d.delta)) {
+    const dl = num_(d.delta);
+    adjustStock_(sh, { [d.pool]: Math.abs(dl) }, dl < 0 ? -1 : 1, d.device || 'stock-log');
+  }
   return upsertRow_(sh.stocklog, STOCKLOG_HEADERS, d.id, {
     Log_ID: d.id, Date: d.date || today_(), Date_Time: d.atTH || now_(), Device: d.device || '',
     Pool_ID: d.pool || '', Pool_Name: d.poolName || '', Unit: d.unit || '', Change: num_(d.delta),
     Before: num_(d.before), After: num_(d.after), Reason_ID: d.reason || '', Reason: d.reasonLabel || '',
     Note: d.note || '', Staff: d.staff || '', Cost_Value: num_(d.costValue), Synced_At: now_(),
   });
+}
+
+/* ---------- v4: activity log · staff summary · live pull ---------- */
+
+function activityLog_(d, sh) {
+  if (!d.id) throw new Error('Missing activity id');
+  if (findRow_(sh.activity, d.id)) return 'duplicate';
+  return upsertRow_(sh.activity, ACTIVITY_HEADERS, d.id, {
+    Log_ID: d.id, Date: d.date || today_(), Date_Time: d.atTH || now_(), Hour: num_(d.hour), Device: d.device || '',
+    Staff_ID: d.staffId || '', Staff: d.staff || '', Type: d.type || '', Detail: d.detail || '', Amount: num_(d.amount),
+    Shift_ID: d.shiftId || '', Synced_At: now_(),
+  });
+}
+
+/** One row per day × account × device, keyed → re-sending the same range just updates the rows. */
+function staffSummary_(d, sh) {
+  const rows = Array.isArray(d.rows) ? d.rows : [];
+  rows.forEach(function (r) {
+    if (!r.key) return;
+    upsertRow_(sh.staffsum, STAFFSUM_HEADERS, r.key, {
+      Key: r.key, Date: r.date, Staff: r.staff, Device: r.device || '', Bills: num_(r.bills), Sales: num_(r.sales), Voids: num_(r.voids),
+      Void_Amount: num_(r.voidAmount), Discount: num_(r.discount), Avg_Per_Bill: num_(r.avg), First_Action: r.first || '', Last_Action: r.last || '',
+      Peak_Hour: r.peakHour === '' || r.peakHour == null ? '' : num_(r.peakHour), Hourly_Sales: r.hourly || '', Updated_At: now_(),
+    });
+  });
+  return rows.length;
+}
+
+/** Newest `n` rows of a sheet as {header: value} objects (dates → text). */
+function tailRows_(sheet, headers, n) {
+  const last = sheet.getLastRow();
+  if (last < 2) return [];
+  const start = Math.max(2, last - n + 1);
+  const w = Math.min(sheet.getLastColumn(), headers.length);
+  return sheet.getRange(start, 1, last - start + 1, w).getValues().map(function (v) {
+    const o = {};
+    headers.forEach(function (h, i) {
+      let x = i < w ? v[i] : '';
+      if (x instanceof Date) x = Utilities.formatDate(x, TIMEZONE, h === 'Date' ? 'yyyy-MM-dd' : 'dd/MM/yyyy HH:mm:ss');
+      o[h] = x;
+    });
+    return o;
+  });
+}
+
+function pullActivity_(d, sh) {
+  const from = String(d.from || today_());
+  const to = String(d.to || today_());
+  const rows = tailRows_(sh.activity, ACTIVITY_HEADERS, 6000).filter(function (r) { return r.Date >= from && r.Date <= to; });
+  return { rows: rows };
+}
+
+/** Everything a device needs every ~20 s: shared stock + the other iPads' shifts, cash moves, stock log, activity. */
+function pullLive_(sh) {
+  const since = Utilities.formatDate(new Date(Date.now() - 3 * 86400000), TIMEZONE, 'yyyy-MM-dd');
+  const closedShifts = tailRows_(sh.shifts, SHIFT_HEADERS, 150);
+  const ids = {};
+  closedShifts.forEach(function (r) { ids[r.Shift_ID] = true; });
+  return {
+    stock: getState_(sh.state, 'stock'),
+    ledger: {
+      shifts: closedShifts,
+      moves: tailRows_(sh.moves, MOVE_HEADERS, 600).filter(function (m) { return ids[m.Shift_ID]; }),
+      stocklog: tailRows_(sh.stocklog, STOCKLOG_HEADERS, 400).filter(function (r) { return r.Date >= since; }),
+      activity: tailRows_(sh.activity, ACTIVITY_HEADERS, 500).filter(function (r) { return r.Date >= since; }),
+    },
+    serverTime: now_(),
+  };
 }
 
 /** KDS ▸ เสร็จแล้ว / เรียกคืน. Last writer wins (by client timestamp); a voided bill stays VOIDED. */
@@ -495,7 +581,7 @@ function pullReport_(d, sh) {
       out.bills.push({
         id: String(v[oc('Order_ID')]), date: date, hour: hour || 0, net: num_(v[oc('Net_Total')]), cost: num_(v[oc('Total_Cost')]),
         method: String(v[oc('Payment_Method')] || '-'), staff: String(v[oc('Staff')] || '-'), status: String(v[oc('Status')]),
-        discount: num_(v[oc('Total_Discount')]),
+        discount: num_(v[oc('Total_Discount')]), device: String(v[oc('Device')] || ''),
       });
     });
   }
@@ -627,6 +713,7 @@ function orderRow_(o, status, kitchen) {
     Payment_Method: o.paymentMethod || '',
     Cash_Received: o.cashReceived === '' || o.cashReceived == null ? '' : num_(o.cashReceived),
     Change: o.change === '' || o.change == null ? '' : num_(o.change),
+    Cash_In_Drawer: o.cashInDrawer === '' || o.cashInDrawer == null ? '' : num_(o.cashInDrawer),
     Device: o.device || '',
     Voided_At: status === 'VOIDED' ? (o.voidedAt || now_()) : '',
     Void_Reason: o.voidReason || '',
@@ -702,6 +789,8 @@ function ensureSheets_(ss) {
     moves: ensureSheet_(ss, SHEET_MOVES, MOVE_HEADERS, ['Move_ID', 'Shift_ID', 'Date_Time', 'Synced_At']),
     stocklog: ensureSheet_(ss, SHEET_STOCKLOG, STOCKLOG_HEADERS, ['Log_ID', 'Date', 'Date_Time', 'Synced_At']),
     customers: ensureSheet_(ss, SHEET_CUSTOMERS, CUSTOMER_HEADERS, ['Phone', 'First_Visit', 'Last_Visit', 'Updated_At']),
+    activity: ensureSheet_(ss, SHEET_ACTIVITY, ACTIVITY_HEADERS, ['Log_ID', 'Date', 'Date_Time', 'Synced_At']),
+    staffsum: ensureSheet_(ss, SHEET_STAFFSUM, STAFFSUM_HEADERS, ['Key', 'Date', 'Updated_At']),
   };
 }
 

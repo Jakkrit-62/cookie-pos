@@ -6,7 +6,7 @@
    ========================================================================== */
 'use strict';
 
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '4.0.0';
 
 /* ==========================================================================
    1. CONSTANTS
@@ -36,7 +36,9 @@ const PERMS = {
   stock: 'ปรับสต็อก',
   settings: 'ตั้งค่า & Cloud Sync',
   cashMove: 'เงินเข้า-ออกลิ้นชัก',
-  reports: 'ดูรายงาน / กำไร',
+  reports: 'ดูรายงาน / กำไร / แดชบอร์ดรายบัญชี',
+  salesTotals: 'เห็นยอดขายรวม (ประวัติบิล / ปิดกะ / ใบสรุปกะ)',
+  variance: 'เห็นยอดเงินขาด-เกิน และเงินที่ควรมีในลิ้นชัก',
 };
 const defaultPrefs = () => ({
   lowDefaults: { unit: 5, weight: 200, set: 3 },
@@ -44,7 +46,7 @@ const defaultPrefs = () => ({
   promptpayName: '',
   receipt: { address: '', taxId: '', phone: '', footer: 'ขอบคุณที่อุดหนุนค่ะ 🍪', width: '58', showDone: true },
   loyalty: { enabled: false, spendPerPoint: 100, pointValue: 1, minRedeem: 10 },
-  perms: { void: 'owner', discount: 'owner', manage: 'owner', stock: 'owner', settings: 'owner', cashMove: 'staff', reports: 'owner' },
+  perms: { void: 'owner', discount: 'owner', manage: 'owner', stock: 'owner', settings: 'owner', cashMove: 'staff', reports: 'owner', salesTotals: 'owner', variance: 'owner' },
   requireShift: false,
   kds: { warnMin: 5, lateMin: 10, pollSec: 6 },
 });
@@ -193,7 +195,13 @@ function svg(name, size = 22) {
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const pad = (n, len = 2) => String(n).padStart(len, '0');
-const round2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+/** Round to 2 decimals without float drift (1.005 → 1.01). Money is summed in integer satang — never as raw floats. */
+const round2 = (n) => { const x = Number(n) || 0; return Math.round(x * 100 + (x >= 0 ? 1e-7 : -1e-7)) / 100; };
+const toSatang = (v) => Math.round(round2(v) * 100);
+const fromSatang = (s) => s / 100;
+const sumMoney = (list, f = (x) => x) => fromSatang(list.reduce((s, x) => s + toSatang(f(x)), 0));
+/** Typed money → number with ≤ 2 decimals, or NaN when invalid / negative. */
+const parseMoney = (v) => { const n = parseFloat(String(v).replace(/,/g, '')); return isFinite(n) && n >= 0 ? round2(n) : NaN; };
 const toInt = (v) => Math.max(0, Math.floor(Number(v) || 0));
 const num = (v) => { const n = parseFloat(v); return isFinite(n) ? round2(n) : 0; };
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -496,13 +504,13 @@ const save = {
 /* ---------- IndexedDB data store: orders, stock log, closed shifts (hundreds of MB vs ~5 MB localStorage) ---------- */
 const DataDB = (() => {
   const DB_NAME = 'pos-data';
-  const STORES = ['orders', 'stocklog', 'shifts'];
+  const STORES = ['orders', 'stocklog', 'shifts', 'activity'];
   let dbPromise = null;
   function open() {
     if (!('indexedDB' in window)) return Promise.reject(new Error('IndexedDB not supported'));
     if (!dbPromise) {
       dbPromise = new Promise((resolve, reject) => {
-        const req = indexedDB.open(DB_NAME, 1);
+        const req = indexedDB.open(DB_NAME, 2);
         req.onupgradeneeded = () => {
           for (const s of STORES) if (!req.result.objectStoreNames.contains(s)) req.result.createObjectStore(s, { keyPath: 'id' });
         };
@@ -982,7 +990,7 @@ function toast(msg, type = '', ms = 2600) {
 
 function openModal(id) { $(`#${id}`).classList.add('open'); }
 function closeModal(id) { $(`#${id}`).classList.remove('open'); }
-const isOpen = (id) => $(`#${id}`).classList.contains('open');
+const isOpen = (id) => { const el = document.getElementById(id); return !!el && el.classList.contains('open'); };
 
 /** Re-render a modal body without losing scroll position */
 function paint(el, html) {
@@ -1045,6 +1053,7 @@ function renderHeader() {
   btn.classList.toggle('syncing', busy);
   $('#syncLabel').textContent = busy ? 'กำลัง Sync…' : (n ? `Sync Pending (${n})` : 'Synced ✓');
   renderStaffChip();
+  applyPermUI();
   renderAuthBanner();
 }
 
@@ -1172,8 +1181,8 @@ function renderTotals(t) {
   }
   $('#promoRows').innerHTML = html;
   const manual = $('#manualDiscount');
-  manual.readOnly = !can('discount') && !state.cart.discountBy;
-  manual.placeholder = manual.readOnly ? '🔒' : '0';
+  manual.readOnly = !can('discount');
+  manual.placeholder = '0';
   $('#manualNote').textContent = t.manualRequested > t.manualDiscount
     ? `ส่วนลดเพิ่มเติมถูกจำกัดไว้ที่ ${money(t.manualDiscount)} (ไม่เกินยอดคงเหลือ)` : (state.cart.discountBy ? `อนุมัติส่วนลดโดย ${state.cart.discountBy}` : '');
   $('#sumNet').textContent = money(t.net);
@@ -1616,12 +1625,12 @@ function updatePayState() {
   let ok = !!payCtx.method && !payCtx.busy;
   const due = $('#changeDue');
   if (isCashMethod(payCtx.method) && due) {
-    const received = parseFloat(payCtx.cash);
+    const received = parseMoney(payCtx.cash);
     if (payCtx.cash === '' || isNaN(received)) {
       due.className = 'change-due';
       due.innerHTML = `<span>เงินทอน</span><b>—</b>`;
     } else {
-      const change = round2(received - t.net);
+      const change = fromSatang(toSatang(received) - toSatang(t.net));
       due.className = `change-due ${change < 0 ? 'neg' : ''}`;
       due.innerHTML = change < 0 ? `<span>รับเงินไม่พอ ขาดอีก</span><b>${money(-change)}</b>` : `<span>เงินทอน</span><b>${money(change)}</b>`;
       if (change < 0) ok = false;
@@ -1719,11 +1728,16 @@ async function confirmPayment() {
   if (memberName && state.cart.customer) state.cart.customer.name = memberName.value.trim();
   const t = cartTotals();
   const pm = payMethod(payCtx.method);
-  let cashReceived = null, change = null;
-  if (pm && pm.kind === 'cash' && payCtx.cash !== '') {
-    cashReceived = round2(parseFloat(payCtx.cash) || 0);
-    change = round2(cashReceived - t.net);
-    if (change < 0) return toast('รับเงินไม่พอ', 'error');
+  // cash: received − change = what stays in the drawer = net, exactly (integer satang). Blank input = exact amount.
+  let cashReceived = null, change = null, cashInDrawer = 0;
+  if (pm && pm.kind === 'cash') {
+    const rcv = payCtx.cash === '' ? t.net : parseMoney(payCtx.cash);
+    if (isNaN(rcv)) return toast('ยอดเงินที่รับไม่ถูกต้อง', 'error');
+    const ch = toSatang(rcv) - toSatang(t.net);
+    if (ch < 0) return toast('รับเงินไม่พอ', 'error');
+    cashReceived = rcv;
+    change = fromSatang(ch);
+    cashInDrawer = fromSatang(toSatang(cashReceived) - toSatang(change));
   }
   payCtx.busy = true;
   updatePayState();
@@ -1755,7 +1769,7 @@ async function confirmPayment() {
     net: t.net,
     totalCost: round2(items.reduce((s, i) => s + i.cost, 0)),
     customer: cust ? { phone: cust.phone, name: cust.name || (state.customers[cust.phone] && state.customers[cust.phone].name) || '', earned: t.pointsEarned, redeemed: t.pointsRedeemed } : null,
-    payment: { method: payCtx.method, label: pm ? pm.label : payCtx.method, kind: pm ? pm.kind : 'other', cashReceived, change },
+    payment: { method: payCtx.method, label: pm ? pm.label : payCtx.method, kind: pm ? pm.kind : 'other', cashReceived, change, cashInDrawer },
     stockDeduction: cartNeeds(),
     kitchenStatus: ticket.items.length ? 'PENDING' : 'NONE',
     kitchen: ticket,
@@ -1778,6 +1792,7 @@ async function confirmPayment() {
   save.stock();
   if (order.customer) applyCustomerOrder(order, 1);
   enqueue('NEW_ORDER', order.id);
+  logActivity('SALE', `${order.queueNo ? `#${order.queueNo} ` : ''}${order.id} · ${order.payment.label}${order.manualDiscount ? ` · ลดเพิ่ม ${money(order.manualDiscount)}` : ''}`, order.net);
   resetCart();
 
   closeModal('m-pay');
@@ -1880,7 +1895,9 @@ function orderSyncPill(o) {
 
 function renderHistory() {
   const modal = $('#m-history');
-  const tabs = [['bills', 'ประวัติบิล', 'receipt'], ['report', 'วิเคราะห์ยอดขาย & กำไร', 'chart'], ['shift', 'กะ & ลิ้นชักเงินสด', 'cash']];
+  if (histTab === 'report' && !can('reports')) histTab = 'bills';
+  const tabs = [['bills', 'ประวัติบิล', 'receipt'], ['report', 'วิเคราะห์ยอดขาย & กำไร', 'chart'], ['shift', 'กะ & ลิ้นชักเงินสด', 'cash']]
+    .filter((t) => t[0] !== 'report' || can('reports'));
   const head = `
     <div class="mgr-tabs">
       ${tabs.map(([id, label, ic]) => `<button class="mgr-tab ${histTab === id ? 'on' : ''}" data-htab="${id}" type="button">${svg(ic, 18)} ${label}</button>`).join('')}
@@ -1891,7 +1908,7 @@ function renderHistory() {
   const orders = ordersForHistory().sort((a, b) => ((a.createdAtISO || '') < (b.createdAtISO || '') ? 1 : -1));
   const done = orders.filter((o) => o.status !== 'VOIDED');
   const voided = orders.length - done.length;
-  const sum = (arr, f) => round2(arr.reduce((s, o) => s + f(o), 0));
+  const sum = (arr, f) => sumMoney(arr, f);
   const methodIds = [...new Set(payMethods(false).map((m) => m.id).concat(done.map((o) => o.payment.method)))];
   const methodStats = methodIds.map((id) => {
     const list = done.filter((o) => o.payment.method === id);
@@ -1932,7 +1949,7 @@ function renderHistory() {
         : `<span class="pill pill-ok">ปกติ</span>${o.remote ? `<div class="help">ยกเลิกได้ที่เครื่อง ${esc(o.device)}</div>` : `
           <div class="row" style="margin-top:8px;gap:6px">
             <button class="btn btn-outline btn-sm" data-receipt="${esc(o.id)}" type="button">${svg('printer', 16)} ใบเสร็จ</button>
-            <button class="btn btn-danger btn-sm" data-void="${esc(o.id)}" type="button">${can('void') ? '' : '🔒 '}ยกเลิกบิล</button>
+            ${can('void') ? `<button class="btn btn-danger btn-sm" data-void="${esc(o.id)}" type="button">ยกเลิกบิล</button>` : ''}
           </div>`}`}</td>
     </tr>`;
   }).join('');
@@ -1951,12 +1968,12 @@ function renderHistory() {
       <span class="help">${histLoading ? 'กำลังดึงบิลจาก Cloud…' : `วันที่ <b>${fmtDateKeyTH(histDate)}</b> · ไม่รวมบิลที่ยกเลิก`}</span>
     </div>
 
-    <div class="stat-grid">
+    ${can('salesTotals') ? `<div class="stat-grid">
       <div class="stat primary span2"><div class="k">ยอดขายสุทธิรวม${histScope === 'all' ? ' (ทุกเครื่อง)' : ''}</div><div class="v">${money(sum(done, (o) => o.net))}</div><div class="s">${done.length} บิลสำเร็จ${voided ? ` · ยกเลิก ${voided} บิล` : ''}</div></div>
       ${methodStats.map((m) => `<div class="stat"><div class="k">${esc(m.label)}</div><div class="v">${money(m.total)}</div><div class="s">${m.n} บิล</div></div>`).join('')}
       <div class="stat"><div class="k">ส่วนลดรวมทั้งหมด</div><div class="v">${money(sum(done, (o) => o.totalDiscount))}</div>
         <div class="s">โปร ${money(sum(done, (o) => o.promoDiscount))} · รายการ ${money(sum(done, (o) => o.itemDiscount))} · แต้ม ${money(sum(done, (o) => o.pointsDiscount || 0))} · เพิ่มเติม ${money(sum(done, (o) => o.manualDiscount))}</div></div>
-    </div>
+    </div>` : `<div class="stat-grid"><div class="stat"><div class="k">บิลสำเร็จ</div><div class="v">${done.length}</div><div class="s">${voided ? `ยกเลิก ${voided} บิล` : ''}</div></div></div>`}
 
     ${soldRows ? `
       <details class="sold-summary">
@@ -2005,6 +2022,7 @@ async function voidOrder(orderId) {
   save.orders([o]);
   save.stock();
   enqueue('VOID_ORDER', o.id);
+  logActivity('VOID', `${o.id}${o.voidReason ? ` · ${o.voidReason}` : ''}`, o.net, who);
   renderAll();
   if (isOpen('m-history')) renderHistory();
   toast(`ยกเลิกบิล ${o.id} แล้ว · คืนสต็อกเรียบร้อย`, 'success', 3000);
@@ -2020,6 +2038,7 @@ let imageTarget = null;
 
 /** Persist catalog edits, refresh indexes, keep the cart valid and schedule a cloud push. */
 function commitCatalog() {
+  logActivity('EDIT', 'แก้ไขเมนู / หมวด / โปร / ตั้งค่าร้าน', 0, null, { throttle: 90000 });
   state.catalog.updatedAt = isoLocal(new Date());
   for (const p of state.catalog.pools) if (!(p.id in state.stock)) state.stock[p.id] = 0;
   save.catalog();
@@ -2033,6 +2052,7 @@ function commitCatalog() {
 
 async function openManager(tab) {
   if (!(await requirePerm('manage', 'จัดการเมนู & สต็อก'))) return;
+  logActivity('ACCESS', 'เปิดหน้าจัดการเมนู & สต็อก', 0, null, { throttle: 300000 });
   if (tab) mgr.tab = tab;
   renderManager();
   openModal('m-manage');
@@ -2046,7 +2066,8 @@ function renderManager() {
     ['stock', 'สต็อก', 'box', state.catalog.pools.length],
     ['log', 'ประวัติสต็อก', 'list', ''],
     ['shop', 'ตัวเลือกร้าน', 'sliders', ''],
-  ];
+  ].filter((t) => !['stock', 'log'].includes(t[0]) || can('stock'));
+  if (['stock', 'log'].includes(mgr.tab) && !can('stock')) mgr.tab = 'menu';
   const body = $('#m-manage .modal-body');
   const views = { cats: mgrCatsHTML, promos: mgrPromosHTML, stock: mgrStockHTML, log: mgrStockLogHTML, shop: mgrShopHTML };
   const content = (views[mgr.tab] || mgrMenuHTML)();
@@ -2253,8 +2274,9 @@ async function setStock(key, value, { flash = true, reason = 'count', note = '' 
   const before = state.stock[key] || 0;
   state.stock[key] = toInt(value);
   save.stock();
-  markDirty('stock', key);
-  if (state.stock[key] !== before) logStock(key, before, state.stock[key], reason, note, who);
+  // The adjustment travels as a STOCK_LOG delta (server applies it once) — never as an absolute value that could
+  // overwrite a sale another iPad just made.
+  if (state.stock[key] !== before) { logStock(key, before, state.stock[key], reason, note, who); syncNow({ silent: true }); }
   if (row) {
     const input = row.querySelector('.stock-input');
     if (document.activeElement !== input) input.value = state.stock[key];
@@ -2597,6 +2619,7 @@ function orderSyncData(o) {
     paymentKey: o.payment.method,
     cashReceived: o.payment.cashReceived == null ? '' : o.payment.cashReceived,
     change: o.payment.change == null ? '' : o.payment.change,
+    cashInDrawer: o.payment.cashInDrawer == null ? '' : o.payment.cashInDrawer,
     device: o.device,
     voidedAt: o.voidedAtTH || '',
     voidReason: o.voidReason || '',
@@ -2905,6 +2928,26 @@ async function pushState({ full = false, silent = false } = {}) {
  * Apply a PULL_STATE result. Cloud stock already contains every synced order; orders still
  * waiting in this device's queue are re-applied on top so nothing is double-counted or lost.
  */
+/**
+ * Cloud stock + this device's own not-yet-sent changes (sales / voids / adjustments waiting in the queue,
+ * absolute edits waiting to be pushed) = the number this iPad should show right now.
+ */
+function mergeServerStock(serverStock) {
+  const s = sanitizeStock(serverStock, state.catalog);
+  for (const q of state.queue) {
+    if (q.payload) {
+      if (q.action === 'STOCK_LOG' && q.payload.pool in s) s[q.payload.pool] = Math.max(0, round2((s[q.payload.pool] || 0) + num(q.payload.delta)));
+      continue;
+    }
+    const o = state.orders.find((x) => x.id === q.orderId);
+    if (!o) continue;
+    const sign = q.action === 'NEW_ORDER' ? -1 : 1;
+    for (const k in o.stockDeduction || {}) s[k] = Math.max(0, (s[k] || 0) + sign * o.stockDeduction[k]);
+  }
+  for (const k of Object.keys(state.syncMeta.stockDirty || {})) if (k in state.stock) s[k] = state.stock[k];
+  return s;
+}
+
 async function applyPulledState(r) {
   if (r.catalog) {
     state.catalog = normalizeCatalog(r.catalog);
@@ -2917,15 +2960,7 @@ async function applyPulledState(r) {
     save.settings();
   }
   if (r.stock && typeof r.stock === 'object') {
-    const s = sanitizeStock(r.stock, state.catalog);
-    for (const q of state.queue) {
-      if (q.payload) continue;
-      const o = state.orders.find((x) => x.id === q.orderId);
-      if (!o) continue;
-      const sign = q.action === 'NEW_ORDER' ? -1 : 1;
-      for (const k in o.stockDeduction || {}) s[k] = Math.max(0, (s[k] || 0) + sign * o.stockDeduction[k]);
-    }
-    state.stock = s;
+    state.stock = mergeServerStock(r.stock);
   } else {
     state.stock = sanitizeStock(state.stock, state.catalog);
   }
@@ -3031,6 +3066,7 @@ async function testConnection() {
 
 async function openSettings(tab) {
   if (!(await requirePerm('settings', 'ตั้งค่า'))) return;
+  logActivity('ACCESS', 'เปิดหน้าตั้งค่า', 0, null, { throttle: 300000 });
   if (tab) setTab = tab;
   renderSettings();
   openModal('m-settings');
@@ -3339,6 +3375,7 @@ function bindEvents() {
   $('#btnSettings').addEventListener('click', () => openSettings());
   $('#btnUpdate').addEventListener('click', updateApp);
   $('#btnStaff').addEventListener('click', openStaffMenu);
+  $('#kitchenChip').addEventListener('click', openKitchenList);
 
   $('#catTabs').addEventListener('click', (e) => {
     if (e.target.closest('[data-act="cat-manage"]')) { openManager('cats'); return; }
@@ -3384,16 +3421,7 @@ function bindEvents() {
     save.cart();
     renderTotals();
   });
-  manual.addEventListener('focus', async () => {
-    if (!manual.readOnly) { manual.select(); return; }
-    manual.blur();
-    const who = await requirePerm('discount', 'ให้ส่วนลดเพิ่มเติม', { force: true });
-    if (!who) return;
-    state.cart.discountBy = who.name || 'เจ้าของร้าน';
-    save.cart();
-    renderTotals();
-    manual.focus();
-  });
+  manual.addEventListener('focus', () => { if (!manual.readOnly) manual.select(); });
   $('#btnCheckout').addEventListener('click', openPayment);
 
   // dynamic modals (created on demand) — one delegated listener per event type
@@ -3673,7 +3701,7 @@ async function init() {
   setInterval(renderClock, 1000);
   const kds = state.settings.deviceMode === 'kds';
   document.body.classList.toggle('mode-kds', kds);
-  if (kds) startKDS(); else renderAll();
+  if (kds) startKDS(); else { renderAll(); startLiveSync(); }
   if (!kds && state.catalog.staff.length && !state.session) showLock();
 
   try {
